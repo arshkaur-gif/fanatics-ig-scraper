@@ -96,6 +96,37 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill(args: argparse.Namespace) -> int:
+    country = "United States" if args.us_only else None
+
+    stop_event = threading.Event()
+
+    def handle_sigint(signum, frame):
+        _log("Stop requested — finishing current item, then exiting cleanly…")
+        stop_event.set()
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    def progress(p):
+        done = p.get("queue_done", 0)
+        if done == 1 or done % 25 == 0 or done == p.get("queue_total"):
+            _log(f"backfill · {done}/{p.get('queue_total', 0)} results filled this run")
+
+    conn = store.connect(args.db)
+    pending = len(store.rows_missing_results(conn, country=country))
+    conn.close()
+    _log(f"Backfilling last_cash_date / recent_earnings — {pending} enriched rows missing them"
+         + (f" ({country})" if country else ""))
+
+    started = time.time()
+    summary = hendon_harvest.backfill_results(
+        db_path=args.db, country=country, limit=args.limit, progress_cb=progress,
+        stop_event=stop_event,
+    )
+    _log(f"{'STOPPED' if summary['stopped'] else 'DONE'} in {round(time.time() - started, 1)}s — "
+         f"{summary['backfilled']} rows backfilled this run")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     conn = store.connect(args.db)
     overall = store.counts(conn)
@@ -114,8 +145,9 @@ def cmd_export(args: argparse.Namespace) -> int:
     out = open(args.output, "w", newline="") if args.output else sys.stdout
     try:
         writer = csv.writer(out)
-        writer.writerow(["rank", "name", "country", "earnings", "city_state",
-                         "profile_url", "socials", "profile_scraped_at"])
+        writer.writerow(["rank", "name", "country", "earnings", "recent_earnings",
+                         "last_cash_date", "city_state", "profile_url", "socials",
+                         "profile_scraped_at"])
         conn = store.connect(args.db)
         where, params = [], []
         if country:
@@ -123,8 +155,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             params.append(country)
         if args.scraped_only:
             where.append("profile_scraped_at IS NOT NULL")
-        sql = ("SELECT rank, name, country, earnings, city_state, profile_url, "
-               "profiles, profile_scraped_at FROM players")
+        sql = ("SELECT rank, name, country, earnings, recent_earnings, last_cash_date, "
+               "city_state, profile_url, profiles, profile_scraped_at FROM players")
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY rank"
@@ -135,6 +167,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             except Exception:
                 socials = ""
             writer.writerow([row["rank"], row["name"], row["country"], row["earnings"],
+                             row["recent_earnings"], row["last_cash_date"],
                              row["city_state"], row["profile_url"], socials,
                              row["profile_scraped_at"]])
             n += 1
@@ -163,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--refresh-after", type=int, default=None,
                        help="Also re-enrich rows older than N days")
     p_run.set_defaults(func=cmd_run)
+
+    p_backfill = sub.add_parser("backfill",
+                                help="Fill last_cash_date / recent_earnings on already-enriched rows")
+    p_backfill.add_argument("--us-only", action="store_true", help="Restrict to US players")
+    p_backfill.add_argument("--limit", type=int, default=None, help="Max rows to backfill this run")
+    p_backfill.set_defaults(func=cmd_backfill)
 
     p_status = sub.add_parser("status", help="Print cache counts")
     p_status.set_defaults(func=cmd_status)
