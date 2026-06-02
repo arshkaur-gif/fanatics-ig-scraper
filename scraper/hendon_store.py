@@ -50,11 +50,18 @@ def connect(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
             profile_url        TEXT,
             city_state         TEXT,
             profiles           TEXT,
+            last_cash_date     TEXT,
+            recent_earnings    TEXT,
             profile_scraped_at TEXT,
             roster_updated_at  TEXT
         )
         """
     )
+    # Migrate older DBs created before the results columns existed.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
+    for col in ("last_cash_date", "recent_earnings"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE players ADD COLUMN {col} TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped ON players(profile_scraped_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_country ON players(country)")
     conn.commit()
@@ -130,14 +137,50 @@ def pending_profiles(conn: sqlite3.Connection, limit: int | None = None,
     return conn.execute(sql, params).fetchall()
 
 
-def save_profile(conn: sqlite3.Connection, player_id: str,
-                 city_state: str, profiles: dict) -> None:
+def save_profile(conn: sqlite3.Connection, player_id: str, city_state: str,
+                 profiles: dict, last_cash_date: str = "",
+                 recent_earnings: str = "") -> None:
     """Write enrichment for one player and stamp profile_scraped_at."""
     conn.execute(
-        "UPDATE players SET city_state=?, profiles=?, profile_scraped_at=? WHERE player_id=?",
-        (city_state, json.dumps(profiles or {}), datetime.utcnow().isoformat(), player_id),
+        "UPDATE players SET city_state=?, profiles=?, last_cash_date=?, "
+        "recent_earnings=?, profile_scraped_at=? WHERE player_id=?",
+        (city_state, json.dumps(profiles or {}), last_cash_date, recent_earnings,
+         datetime.utcnow().isoformat(), player_id),
     )
     conn.commit()
+
+
+def save_results(conn: sqlite3.Connection, player_id: str,
+                 last_cash_date: str, recent_earnings: str) -> None:
+    """
+    Backfill only the results-derived fields on an already-enriched row,
+    leaving profile_scraped_at (and the rest of the profile data) untouched.
+    """
+    conn.execute(
+        "UPDATE players SET last_cash_date=?, recent_earnings=? WHERE player_id=?",
+        (last_cash_date, recent_earnings, player_id),
+    )
+    conn.commit()
+
+
+def rows_missing_results(conn: sqlite3.Connection, country: str | None = None,
+                         limit: int | None = None) -> list[sqlite3.Row]:
+    """
+    Already-enriched rows that predate the results columns (the backfill queue):
+    a profile was scraped but last_cash_date was never populated.
+    """
+    where = ["profile_scraped_at IS NOT NULL",
+             "(last_cash_date IS NULL OR last_cash_date = '')",
+             "profile_url IS NOT NULL AND profile_url != ''"]
+    params: list = []
+    if country:
+        where.append("country = ?")
+        params.append(country)
+    sql = f"SELECT * FROM players WHERE {' AND '.join(where)} ORDER BY rank"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, params).fetchall()
 
 
 def counts(conn: sqlite3.Connection, country: str | None = None) -> dict:

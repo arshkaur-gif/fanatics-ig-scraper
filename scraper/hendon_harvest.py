@@ -101,10 +101,11 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
                     break
                 html = _load_via_driver(driver, row["profile_url"], ready_marker="<table")
                 if html:
-                    city_state, profiles = _parse_profile_details(
+                    city_state, profiles, last_cash_date, recent_earnings = _parse_profile_details(
                         html, row["profile_url"], row["country"] or ""
                     )
-                    store.save_profile(conn, row["player_id"], city_state, profiles)
+                    store.save_profile(conn, row["player_id"], city_state, profiles,
+                                       last_cash_date, recent_earnings)
                 profiles_done = i
                 report(phase="profiles", queue_done=i, queue_total=total_queue,
                        **store.counts(conn, country))
@@ -121,3 +122,54 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
         "roster_added": roster_added,
         "profiles_done": profiles_done,
     }
+
+
+def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
+                     country: str | None = None,
+                     limit: int | None = None,
+                     profile_delay: float = 0.3,
+                     progress_cb=None,
+                     stop_event: threading.Event | None = None) -> dict:
+    """
+    Re-visit already-enriched profiles to populate last_cash_date /
+    recent_earnings on rows scraped before those columns existed.
+
+    Reuses one headed browser session and only touches the results fields
+    (profile_scraped_at and the rest of the profile data are left intact), so
+    it's resumable: re-running picks up whatever is still missing.
+    """
+    stop_event = stop_event or threading.Event()
+
+    def report(**kw):
+        if progress_cb:
+            progress_cb(kw)
+
+    driver = _new_undetected_driver()
+    if driver is None:
+        raise RuntimeError("undetected-chromedriver is required to harvest The Hendon Mob")
+    conn = store.connect(db_path)
+
+    done = 0
+    try:
+        queue = store.rows_missing_results(conn, country=country, limit=limit)
+        total_queue = len(queue)
+        for i, row in enumerate(queue, 1):
+            if stop_event.is_set():
+                break
+            html = _load_via_driver(driver, row["profile_url"], ready_marker="<table")
+            if html:
+                _, _, last_cash_date, recent_earnings = _parse_profile_details(
+                    html, row["profile_url"], row["country"] or ""
+                )
+                store.save_results(conn, row["player_id"], last_cash_date, recent_earnings)
+            done = i
+            report(phase="backfill", queue_done=i, queue_total=total_queue)
+            time.sleep(profile_delay)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        conn.close()
+
+    return {"stopped": stop_event.is_set(), "backfilled": done}

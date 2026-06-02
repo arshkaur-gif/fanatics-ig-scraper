@@ -178,11 +178,13 @@ def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1,
                 # challenge cleared, then parse the (optional) location + socials.
                 prof_html = _load_via_driver(driver, p["profile_url"], ready_marker="<table")
                 if prof_html:
-                    city_state, profiles = _parse_profile_details(
+                    city_state, profiles, last_cash_date, recent_earnings = _parse_profile_details(
                         prof_html, p["profile_url"], p.get("country", "")
                     )
                     p["city_state"] = city_state
                     p["profiles"] = profiles
+                    p["last_cash_date"] = last_cash_date
+                    p["recent_earnings"] = recent_earnings
                 time.sleep(profile_delay)
     finally:
         try:
@@ -197,14 +199,63 @@ def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1,
 _PROFILE_SOCIAL_PLATFORMS = ("twitter", "facebook", "instagram", "youtube", "tiktok", "twitch")
 
 
+def _parse_player_results(soup):
+    """
+    From a profile's results table → (last_cash_date, recent_earnings_usd).
+
+    last_cash_date is the ISO date (YYYY-MM-DD) of the player's most recent
+    recorded tournament cash — the "is this player still active?" signal.
+    recent_earnings_usd is their total USD winnings over the trailing 12 months,
+    formatted like the all-time earnings column ("$ 1,234,567"). Both are ""
+    when the table has no parseable results.
+
+    The results table (`table--player-results`) lists one cash per row, newest
+    first; `td.date` holds e.g. "20-May-2026" and the USD-normalised prize is the
+    `td.currency` cell containing "$" (a second cell holds the local currency).
+    """
+    table = soup.find("table", class_="table--player-results")
+    if not table:
+        return "", ""
+
+    cutoff = datetime.utcnow() - timedelta(days=365)
+    dates = []
+    recent_total = 0.0
+    for tr in table.find_all("tr"):
+        date_cell = tr.find("td", class_="date")
+        if not date_cell:
+            continue  # header / spacer row
+        try:
+            dt = datetime.strptime(date_cell.get_text(strip=True), "%d-%b-%Y")
+        except ValueError:
+            continue
+        dates.append(dt)
+        if dt >= cutoff:
+            for cur in tr.find_all("td", class_="currency"):
+                txt = cur.get_text(strip=True).replace("\xa0", " ")
+                if "$" in txt:
+                    digits = re.sub(r"[^\d.]", "", txt)
+                    if digits:
+                        try:
+                            recent_total += float(digits)
+                        except ValueError:
+                            pass
+                    break
+
+    if not dates:
+        return "", ""
+    return max(dates).strftime("%Y-%m-%d"), f"$ {recent_total:,.0f}"
+
+
 def _parse_profile_details(html, profile_url, country=""):
     """
-    Parse a player profile page → (city_state, social_links_dict).
+    Parse a player profile page → (city_state, profiles, last_cash_date, recent_earnings).
 
     city_state comes from the profile's Residence (falling back to Born) field;
     the trailing country is trimmed since country has its own column. Social
     links are the player's `menu_<platform>` links, returned as absolute Hendon
     Mob URLs (the site routes them through its own /<platform>/<slug> redirect).
+    last_cash_date / recent_earnings come from the results table (see
+    _parse_player_results) and signal recency + recent value.
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -230,7 +281,8 @@ def _parse_profile_details(html, profile_url, country=""):
             if f"menu_{platform}" in classes:
                 profiles[platform] = urljoin(profile_url, a["href"])
 
-    return city_state, profiles
+    last_cash_date, recent_earnings = _parse_player_results(soup)
+    return city_state, profiles, last_cash_date, recent_earnings
 
 
 def _parse_money_list_page(html, page_url):
@@ -264,6 +316,8 @@ def _parse_money_list_page(html, page_url):
                 "profile_url": profile_url,
                 "city_state": "",
                 "profiles": {},
+                "last_cash_date": "",
+                "recent_earnings": "",
             })
 
     has_next = any(
