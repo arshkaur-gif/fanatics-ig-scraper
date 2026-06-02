@@ -14,6 +14,10 @@ app = Flask(__name__)
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
 
+# The Leaderboard UI scrapes a bounded page range; the full multi-day harvest
+# is the CLI's job (scraper.harvest).
+MAX_UI_PAGES = 10
+
 # Approximate Apify pricing per result (used for client-side cost preview)
 COST_PER_FOLLOWER = 0.002
 COST_PER_PROFILE = 0.0023
@@ -349,6 +353,30 @@ HTML = """
     .search-link:hover { opacity: 1; }
     .year-cell { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
     .stale-year { color: var(--warning); }
+
+    /* Contact enrichment */
+    .email-cell { font-size: 12px; color: #a5b4fc; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .phone-cell { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+    .conf-badge { display: inline-flex; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+    .conf-high   { background: rgba(16,185,129,0.1);  color: #6ee7b7; border: 1px solid rgba(16,185,129,0.3); }
+    .conf-medium { background: rgba(245,158,11,0.1);  color: #fcd34d; border: 1px solid rgba(245,158,11,0.3); }
+    .conf-low    { background: rgba(99,102,241,0.1);  color: #c7d2fe; border: 1px solid rgba(99,102,241,0.3); }
+
+    /* Lookup tab */
+    .lk-form { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start; position: relative; z-index: 1; }
+    @media (max-width: 640px) { .lk-form { grid-template-columns: 1fr; } }
+    .lk-textarea {
+      width: 100%; background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 14px; color: var(--text);
+      font-family: 'JetBrains Mono', monospace; font-size: 13px; resize: vertical;
+      outline: none; transition: border-color 150ms, background 150ms;
+      min-height: 110px;
+    }
+    .lk-textarea:focus { border-color: var(--accent); background: #0b0d12; box-shadow: 0 0 0 4px rgba(99,102,241,0.08); }
+    .lk-textarea::placeholder { color: var(--text-dim); }
+    .lk-hint-row { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+    .lk-hint-row .field { flex: 1; flex-direction: row; align-items: center; }
+    .lk-hint-row .field label { white-space: nowrap; margin-right: 8px; }
   </style>
 </head>
 <body>
@@ -421,6 +449,10 @@ HTML = """
           <button class="btn btn-accent-2 btn-sm" onclick="fetchProfileDetails()" id="detailsBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             Get profile details
+          </button>
+          <button class="btn btn-muted btn-sm" onclick="enrichIgContacts()" id="igEnrichBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            Enrich Contacts
           </button>
           <button class="btn btn-muted btn-sm" onclick="exportCSV()">CSV</button>
           <button class="btn btn-muted btn-sm" onclick="exportJSON()">JSON</button>
@@ -531,11 +563,25 @@ HTML = """
           <div class="lb-form-grid">
             <div class="field">
               <label for="lbUrl">Leaderboard URL</label>
-              <input id="lbUrl" name="lbUrl" placeholder="https://www.wsop.com/player-standings/all-time-earnings-men/" value="https://www.wsop.com/player-standings/all-time-earnings-men/" required autocomplete="off">
+              <input id="lbUrl" name="lbUrl" placeholder="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" value="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" required autocomplete="off">
             </div>
             <div class="field">
               <label for="lbMax">Max players</label>
               <input id="lbMax" name="lbMax" type="number" min="10" max="200" value="50">
+            </div>
+            <div class="field">
+              <label for="lbStartPage">Start page</label>
+              <input id="lbStartPage" name="lbStartPage" type="number" min="1" value="1" title="Or put the page number in the URL, e.g. .../all-time-money-list/3">
+            </div>
+            <div class="field">
+              <label for="lbPages"># Pages (max 10)</label>
+              <select id="lbPages" name="lbPages">
+                <option value="1">1 page (~100)</option>
+                <option value="2">2 pages (~200)</option>
+                <option value="3">3 pages (~300)</option>
+                <option value="5">5 pages (~500)</option>
+                <option value="10">10 pages (~1000)</option>
+              </select>
             </div>
             <div class="field">
               <label for="lbMonths">Active within</label>
@@ -556,7 +602,11 @@ HTML = """
               <input type="checkbox" id="lbUsOnly" checked> US players only
             </label>
             <span class="dim">·</span>
-            <span class="dim">Visits each player profile to get city/state &amp; last active year</span>
+            <label>
+              <input type="checkbox" id="lbProfiles"> Visit each profile for city/state &amp; social links
+            </label>
+            <span class="dim">·</span>
+            <span class="dim">Profile visits add ~3s per player. A page number in the URL overrides “Start page”. For the full list use the harvest CLI.</span>
           </div>
         </form>
       </section>
@@ -570,6 +620,10 @@ HTML = """
             <span class="chip" id="lbChip">0</span>
           </h2>
           <div class="toolbar">
+            <button class="btn btn-muted btn-sm" onclick="enrichLbContacts()" id="lbEnrichBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+              Enrich Contacts
+            </button>
             <button class="btn btn-muted btn-sm" onclick="exportLbCSV()">CSV</button>
           </div>
         </div>
@@ -597,6 +651,8 @@ HTML = """
     let sortCol = null;
     let sortDir = 'asc';
     let lastCheckedIdx = null;
+    let igEnrichData = {};
+    let lbEnrichData = {};
 
     // --- Modal ---
     function appConfirm({ title, body, okLabel = 'Confirm', cancelLabel = 'Cancel' }) {
@@ -1137,6 +1193,11 @@ HTML = """
       } else {
         cols.push({ key: 'username_scrape', label: 'Source', sort: false });
       }
+      if (Object.keys(igEnrichData).length > 0) {
+        cols.push({ key: 'email', label: 'Email', sort: false });
+        cols.push({ key: 'phone', label: 'Phone', sort: false });
+        cols.push({ key: 'match', label: 'Match', sort: false });
+      }
       return cols.map(c => {
         const isSorted = sortCol === c.key;
         const arrow = c.sort ? `<span class="sort-arrow">${isSorted ? (sortDir === 'asc' ? '▲' : '▼') : '▲▼'}</span>` : '';
@@ -1171,6 +1232,17 @@ HTML = """
         } else {
           extra += `<td><a class="sub-handle" href="https://instagram.com/${item.username_scrape || ''}" target="_blank">@${item.username_scrape || '—'}</a></td>`;
         }
+        if (Object.keys(igEnrichData).length > 0) {
+          const key = item.full_name || item.username;
+          const enr = igEnrichData[key] || {};
+          const email = (enr.emails || [])[0] || '';
+          const phone = (enr.phones || [])[0] || '';
+          const conf = enr.confidence || 'none';
+          const confCls = conf === 'high' ? 'conf-high' : conf === 'medium' ? 'conf-medium' : conf === 'low' ? 'conf-low' : '';
+          extra += `<td class="email-cell">${email ? `<a href="mailto:${escapeHtml(email)}" style="color:inherit;text-decoration:none;">${escapeHtml(email)}</a>` : '<span class="dim">—</span>'}</td>`;
+          extra += `<td class="phone-cell">${escapeHtml(phone) || '<span class="dim">—</span>'}</td>`;
+          extra += `<td>${email ? `<span class="conf-badge ${confCls}">${conf}</span>` : '<span class="dim">—</span>'}</td>`;
+        }
         return `<tr>${checkCell}${avatarCell}${usernameCell}${nameCell}${statusCell}${extra}</tr>`;
       }).join('');
       updateSelectCount();
@@ -1182,14 +1254,25 @@ HTML = """
 
     function exportCSV() {
       if (!currentData.length) return;
+      const hasEnrich = Object.keys(igEnrichData).length > 0;
       const rows = applySort(applyFilters(currentData));
-      const headers = ['username', 'full_name', 'id', 'is_private', 'is_verified', 'username_scrape'];
-      if (hasDetails) headers.push('biography', 'followers_count', 'follows_count', 'posts_count', 'external_url');
-      const out = rows.map(r => headers.map(h => {
-        let val = r[h];
-        if (Array.isArray(val)) val = val.join('; ');
-        return '"' + String(val ?? '').replace(/"/g, '""') + '"';
-      }).join(','));
+      const baseHeaders = ['username', 'full_name', 'id', 'is_private', 'is_verified', 'username_scrape'];
+      if (hasDetails) baseHeaders.push('biography', 'followers_count', 'follows_count', 'posts_count', 'external_url');
+      const headers = [...baseHeaders, ...(hasEnrich ? ['email', 'phone', 'confidence'] : [])];
+      const out = rows.map(r => {
+        const baseVals = baseHeaders.map(h => {
+          let val = r[h];
+          if (Array.isArray(val)) val = val.join('; ');
+          return '"' + String(val ?? '').replace(/"/g, '""') + '"';
+        });
+        if (hasEnrich) {
+          const enr = igEnrichData[r.full_name || r.username] || {};
+          baseVals.push('"' + ((enr.emails || [])[0] || '') + '"');
+          baseVals.push('"' + ((enr.phones || [])[0] || '') + '"');
+          baseVals.push('"' + (enr.confidence || '') + '"');
+        }
+        return baseVals.join(',');
+      });
       download([headers.join(','), ...out].join('\\n'), 'followers.csv', 'text/csv');
     }
 
@@ -1223,21 +1306,29 @@ HTML = """
       const url      = document.getElementById('lbUrl').value.trim();
       const max      = parseInt(document.getElementById('lbMax').value) || 50;
       const months   = parseInt(document.getElementById('lbMonths').value);
-      const usOnly   = document.getElementById('lbUsOnly').checked;
+      const usOnly    = document.getElementById('lbUsOnly').checked;
+      const pages     = document.getElementById('lbPages').value;
+      const startPage = parseInt(document.getElementById('lbStartPage').value) || 1;
+      const profiles  = document.getElementById('lbProfiles').checked;
 
+      const isHendon = url.includes('thehendonmob.com');
       const btn    = document.getElementById('lbBtn');
       const status = document.getElementById('lbStatus');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span> Scraping';
       status.className = 'status visible';
-      status.innerHTML = '<span class="spinner"></span><span>Scraping leaderboard and player profiles — this may take 30–90 seconds...</span>';
+      const waitMsg = isHendon
+        ? ('Scraping The Hendon Mob — a Chrome window will open to clear the Cloudflare check. ~7s per page'
+           + (profiles ? ', plus ~3s per player for profile details.' : '.'))
+        : 'Scraping leaderboard and player profiles — this may take 30–90 seconds...';
+      status.innerHTML = `<span class="spinner"></span><span>${waitMsg}</span>`;
       document.getElementById('lbResultsCard').classList.remove('visible');
 
       try {
         const res  = await fetch('/api/scrape-leaderboard', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, max_players: max, months_active: months, us_only: usOnly }),
+          body: JSON.stringify({ url, max_players: max, months_active: months, us_only: usOnly, pages, start_page: startPage, fetch_profiles: profiles }),
         });
         const data = await res.json();
         if (data.error) {
@@ -1261,19 +1352,41 @@ HTML = """
     });
 
     function renderLbTable() {
+      const hasEnrich = Object.keys(lbEnrichData).length > 0;
       const search  = document.getElementById('lbSearch').value.toLowerCase();
       const rows    = lbData.filter(p => !search || (p.name || '').toLowerCase().includes(search));
       const stat    = document.getElementById('lbFilterStat');
       stat.textContent = rows.length === lbData.length ? `${lbData.length} players` : `${rows.length} of ${lbData.length} players`;
 
-      const cols = ['Rank', 'Name', 'Metric', 'Country', 'State / City', 'Last Active', 'LinkedIn'];
+      const cols = ['Rank', 'Name', 'Metric', 'Country', 'State / City', 'Last Active', 'Links'];
+      if (hasEnrich) cols.push('Email', 'Phone', 'Socials', 'Match');
       document.getElementById('lbTableHead').innerHTML = cols.map(c => `<th>${c}</th>`).join('');
 
       const currentYear = new Date().getFullYear();
       document.getElementById('lbTableBody').innerHTML = rows.map(p => {
         const q      = encodeURIComponent(`"${p.name}" poker player site:linkedin.com`);
-        const liLink = `<a class="search-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">Search ↗</a>`;
+        const liLink = `<a class="search-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">LinkedIn ↗</a>`;
+        const profileLinks = Object.entries(p.profiles || {}).map(([net, url]) =>
+          `<a class="search-link" href="${escapeHtml(url)}" target="_blank" rel="noopener">${net} ↗</a>`).join(' ');
         const yearCls = p.last_active_year && p.last_active_year < currentYear - 1 ? 'year-cell stale-year' : 'year-cell';
+        let enrichCells = '';
+        if (hasEnrich) {
+          const enr = lbEnrichData[p.name] || {};
+          const email = (enr.emails || [])[0] || '';
+          const phone = (enr.phones || [])[0] || '';
+          const conf = enr.confidence || 'none';
+          const confCls = conf === 'high' ? 'conf-high' : conf === 'medium' ? 'conf-medium' : conf === 'low' ? 'conf-low' : '';
+          const profiles = enr.profiles || {};
+          const socialLinks = Object.entries(profiles).map(([net, url]) =>
+            `<a class="search-link" href="${escapeHtml(url)}" target="_blank" rel="noopener">${net} ↗</a>`
+          ).join(' ');
+          const hasAny = email || phone || socialLinks;
+          enrichCells = `
+            <td class="email-cell">${email ? `<a href="mailto:${escapeHtml(email)}" style="color:inherit;text-decoration:none;">${escapeHtml(email)}</a>` : '<span class="dim">—</span>'}</td>
+            <td class="phone-cell">${escapeHtml(phone) || '<span class="dim">—</span>'}</td>
+            <td style="font-size:12px;">${socialLinks || '<span class="dim">—</span>'}</td>
+            <td>${hasAny ? `<span class="conf-badge ${confCls}">${conf}</span>` : '<span class="dim">—</span>'}</td>`;
+        }
         return `<tr>
           <td class="num-cell">${p.rank ?? '—'}</td>
           <td style="font-weight:500;">${escapeHtml(p.name || '')}</td>
@@ -1281,17 +1394,122 @@ HTML = """
           <td style="font-size:13px;color:var(--text-muted);">${escapeHtml(p.country || '—')}</td>
           <td style="font-size:13px;">${escapeHtml(p.city_state || '—')}</td>
           <td class="${yearCls}">${p.last_active_year ?? '—'}</td>
-          <td>${liLink}</td>
+          <td style="font-size:12px;">${profileLinks ? profileLinks + ' ' : ''}${liLink}</td>
+          ${enrichCells}
         </tr>`;
       }).join('');
     }
 
     function exportLbCSV() {
       if (!lbData.length) return;
-      const headers = ['rank', 'name', 'metric', 'country', 'city_state', 'last_active_year'];
-      const out = lbData.map(r => headers.map(h => '"' + String(r[h] ?? '').replace(/"/g, '""') + '"').join(','));
+      const hasEnrich = Object.keys(lbEnrichData).length > 0;
+      const hasSocials = lbData.some(r => r.profiles && Object.keys(r.profiles).length);
+      const baseHeaders = ['rank', 'name', 'metric', 'country', 'city_state', 'last_active_year'];
+      const headers = [...baseHeaders, ...(hasSocials ? ['socials'] : []), ...(hasEnrich ? ['email', 'phone', 'confidence'] : [])];
+      const out = lbData.map(r => {
+        const vals = baseHeaders.map(h => '"' + String(r[h] ?? '').replace(/"/g, '""') + '"');
+        if (hasSocials) {
+          vals.push('"' + Object.values(r.profiles || {}).join(' ').replace(/"/g, '""') + '"');
+        }
+        if (hasEnrich) {
+          const enr = lbEnrichData[r.name] || {};
+          vals.push('"' + ((enr.emails || [])[0] || '') + '"');
+          vals.push('"' + ((enr.phones || [])[0] || '') + '"');
+          vals.push('"' + (enr.confidence || '') + '"');
+        }
+        return vals.join(',');
+      });
       download([headers.join(','), ...out].join('\\n'), 'leaderboard.csv', 'text/csv');
     }
+
+    // ── Contact enrichment ───────────────────────────────────────────────────
+
+    const _enrichIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+
+    async function enrichLbContacts() {
+      if (!lbData.length) return;
+      const btn    = document.getElementById('lbEnrichBtn');
+      const status = document.getElementById('lbStatus');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Enriching...';
+      status.className = 'status visible';
+      status.innerHTML = `<span class="spinner"></span><span>Enriching via People Data Labs — ~${lbData.length * 0.2}s estimated...</span>`;
+
+      const lbUrl   = document.getElementById('lbUrl').value;
+      const profHint = lbUrl.includes('wsop.com') ? 'poker player' : '';
+
+      try {
+        const res  = await fetch('/api/enrich-contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            players: lbData.map(p => ({ name: p.name, country: p.country })),
+            profession_hint: profHint,
+          })
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.className = 'status visible error';
+          status.textContent = data.error;
+        } else {
+          lbEnrichData = data.results;
+          const withEmail   = Object.values(lbEnrichData).filter(r => r.emails && r.emails.length).length;
+          const withContact = Object.values(lbEnrichData).filter(r => r.emails?.length || r.phones?.length || Object.keys(r.profiles||{}).length).length;
+          status.className = 'status visible success';
+          status.innerHTML = `<span>✓ Enriched ${lbData.length} players · <b>${withContact}</b> with any contact · <b>${withEmail}</b> with email · ${data.elapsed}s</span>`;
+          renderLbTable();
+        }
+      } catch (err) {
+        status.className = 'status visible error';
+        status.textContent = 'Enrichment failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = _enrichIcon + ' Enrich Contacts';
+      }
+    }
+
+    async function enrichIgContacts() {
+      if (!currentData.length) return;
+      const btn    = document.getElementById('igEnrichBtn');
+      const status = document.getElementById('status');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Enriching...';
+      status.className = 'status visible';
+      status.innerHTML = `<span class="spinner"></span><span>Enriching via People Data Labs — ~${currentData.length * 0.2}s estimated...</span>`;
+
+      try {
+        const res  = await fetch('/api/enrich-contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            players: currentData.map(p => ({
+              name: p.full_name || p.username,
+              instagram_url: `https://www.instagram.com/${p.username}/`,
+            })),
+            profession_hint: '',
+          })
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.className = 'status visible error';
+          status.textContent = data.error;
+        } else {
+          igEnrichData = data.results;
+          const withEmail   = Object.values(igEnrichData).filter(r => r.emails && r.emails.length).length;
+          const withContact = Object.values(igEnrichData).filter(r => r.emails?.length || r.phones?.length || Object.keys(r.profiles||{}).length).length;
+          status.className = 'status visible success';
+          status.innerHTML = `<span>✓ Enriched ${currentData.length} profiles · <b>${withContact}</b> with any contact · <b>${withEmail}</b> with email · ${data.elapsed}s</span>`;
+          renderTable();
+        }
+      } catch (err) {
+        status.className = 'status visible error';
+        status.textContent = 'Enrichment failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = _enrichIcon + ' Enrich Contacts';
+      }
+    }
+
   </script>
 </body>
 </html>
@@ -1376,28 +1594,88 @@ def api_profile_details():
 
 @app.route("/api/scrape-leaderboard", methods=["POST"])
 def api_scrape_leaderboard():
+    # openai_key may be None — WSOP URLs don't need it; scraper raises ValueError for non-WSOP without it
     openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        return jsonify(error="OPENAI_API_KEY not configured"), 500
 
     body = request.json or {}
     url = body.get("url", "").strip()
     if not url or not url.startswith("http"):
         return jsonify(error="A valid URL is required"), 400
 
-    max_players  = min(int(body.get("max_players", 50)), 200)
+    max_players   = min(int(body.get("max_players", 50)), 200)
     months_active = int(body.get("months_active", 12))
     us_only       = bool(body.get("us_only", True))
 
     start = time.time()
     try:
-        from scraper.hendon_mob import scrape_leaderboard
-        results = scrape_leaderboard(
-            url=url,
-            us_only=us_only,
-            months_active=months_active,
-            max_players=max_players,
+        if "thehendonmob.com" in url:
+            # Paginated, Cloudflare-protected. This is the bounded interactive
+            # path — page count is capped here (use scraper.harvest for the full
+            # multi-day run). A page number in the URL itself takes precedence.
+            from scraper.hendon_mob import scrape_money_list
+            num_pages = max(1, min(int(body.get("pages", 1)), MAX_UI_PAGES))
+            start_page = int(body["start_page"]) if body.get("start_page") else None
+            fetch_profiles = bool(body.get("fetch_profiles", False))
+            players = scrape_money_list(
+                url=url, start_page=start_page, num_pages=num_pages,
+                fetch_profiles=fetch_profiles,
+                country="United States" if us_only else None,
+            )
+            results = [{
+                "rank": p.get("rank"),
+                "name": p.get("name", ""),
+                "country": p.get("country", ""),
+                "metric": p.get("earnings", ""),
+                "profile_url": p.get("profile_url"),
+                "city_state": p.get("city_state", ""),
+                "last_active_year": None,
+                "profiles": p.get("profiles", {}),
+            } for p in players]
+        else:
+            from scraper.hendon_mob import scrape_leaderboard
+            results = scrape_leaderboard(
+                url=url,
+                us_only=us_only,
+                months_active=months_active,
+                max_players=max_players,
+                openai_api_key=openai_key,
+            )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    elapsed = round(time.time() - start, 1)
+    return jsonify(results=results, elapsed=elapsed, count=len(results))
+
+
+@app.route("/api/enrich-contacts", methods=["POST"])
+def api_enrich_contacts():
+    openai_key   = os.getenv("OPENAI_API_KEY")
+    apify_key    = os.getenv("APIFY_API_TOKEN")
+    twitter_key  = os.getenv("TWITTER_BEARER_TOKEN")
+
+    if not openai_key and not apify_key:
+        return jsonify(error="OPENAI_API_KEY (web-search) or APIFY_API_TOKEN (social scrape) is required"), 500
+
+    body    = request.json or {}
+    players = body.get("players") or []
+    if not players:
+        return jsonify(error="No players provided"), 400
+    if len(players) > 200:
+        return jsonify(error="Max 200 players per enrichment batch"), 400
+
+    profession_hint = body.get("profession_hint", "")
+
+    start = time.time()
+    try:
+        from enrichment.pipeline import enrich_batch
+        results = enrich_batch(
+            players,
+            profession_hint=profession_hint,
             openai_api_key=openai_key,
+            apify_token=apify_key,
+            twitter_bearer=twitter_key,
         )
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -1407,4 +1685,4 @@ def api_scrape_leaderboard():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3002, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3002, debug=True, use_reloader=False, threaded=True)
