@@ -1,4 +1,45 @@
-"""Scraper for public rankings pages. WSOP standings use a direct API; other sites use LLM parsing."""
+"""
+Scraper for public rankings pages.
+
+Three fetch strategies, by site:
+  - WSOP standings    → direct JSON API (clean, fast, no browser needed).
+  - The Hendon Mob    → headed browser via undetected-chromedriver (see below).
+  - Everything else   → curl_cffi HTTP fetch + LLM table parsing.
+
+Getting past The Hendon Mob's Cloudflare challenge
+--------------------------------------------------
+The Hendon Mob's data lives on `pokerdb.thehendonmob.com`, which sits behind
+Cloudflare's "Just a moment..." managed challenge. The first response isn't the
+page — it's a small HTML page carrying obfuscated JavaScript that probes the
+client and only issues a `cf_clearance` cookie (unlocking the real content) if
+the client looks like a genuine browser. There is no API or unprotected route;
+every path on that subdomain is challenged.
+
+Why the obvious approaches fail:
+  - Plain HTTP (requests / curl_cffi) never runs the JS, so it can't complete
+    the challenge — it gets 403/429 no matter how the TLS handshake is faked.
+  - Headless automation (headless Chrome, Playwright) *does* run the JS but is
+    flagged by the challenge's fingerprinting: `navigator.webdriver`, ChromeDriver
+    artifacts (cdc_ vars), and the distinct headless-Chrome fingerprint.
+
+What works: `undetected-chromedriver` (Selenium with patches that strip those
+automation tells) run *headed*. To the challenge's JS it looks like an ordinary
+human-driven Chrome, so the check passes on its own and the clearance cookie is
+issued. We are not breaking anything — we are passing the check legitimately by
+not looking like a bot. After it clears once, the cookie persists in the browser
+session, so reusing a single driver across pages/profiles means Cloudflare only
+challenges us on the first load (~8s) and later loads are fast.
+
+Caveats for maintainers:
+  - It's an arms race. A Cloudflare detection update or a uc/Chrome version bump
+    can break this overnight; treat it as more fragile than the WSOP API path.
+  - Headed-only here. Headless gets flagged for this site, so it needs a visible
+    browser — on a headless server you'd need a virtual display (e.g. xvfb).
+  - Don't hammer it. Too-fast / high-volume traffic can make Cloudflare escalate
+    from the passive managed challenge to an interactive Turnstile/CAPTCHA, which
+    uc cannot silently solve. The `delay` / `profile_delay` pauses exist to stay
+    under that threshold — keep them.
+"""
 
 import json
 import re
@@ -47,6 +88,188 @@ def scrape_leaderboard(url, us_only=True, months_active=12, max_players=50, open
         players = [p for p in players if _is_recently_active(p.get("last_active_year"), cutoff_year)]
 
     return players
+
+
+# ---------------------------------------------------------------------------
+# The Hendon Mob All Time Money List (paginated, direct parse, no LLM)
+# ---------------------------------------------------------------------------
+
+ALL_TIME_MONEY_LIST_URL = "https://pokerdb.thehendonmob.com/ranking/all-time-money-list/"
+
+
+def split_ranking_page(url):
+    """
+    Split a ranking URL into (base_without_trailing_page, page_or_None).
+
+    Hendon Mob paginates as `<ranking>/<n>`, e.g. `.../all-time-money-list/3`
+    or `.../ranking/194/2`. A single numeric segment (`.../ranking/194`) is a
+    ranking id, not a page, so it's left on the base.
+    """
+    base = url.rstrip("/")
+    m = re.search(r"/ranking/(.+)$", base)
+    if m:
+        parts = m.group(1).split("/")
+        if len(parts) >= 2 and parts[-1].isdigit():
+            return base[: -(len(parts[-1]) + 1)], int(parts[-1])
+    return base, None
+
+
+def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1, delay=1.0,
+                      fetch_profiles=False, profile_delay=0.3, country=None):
+    """
+    Scrape a Hendon Mob ranking list, one shot, for a small page range.
+
+    The list lives behind Cloudflare, so this drives one headed browser session
+    (the challenge is solved once and reused for every page). Each page holds 100
+    players in a `table--ranking-list` table; pages are `<url>/2`, `<url>/3`, ...
+
+    For the full multi-day harvest use scraper.harvest (CLI) instead — this is the
+    interactive, bounded path.
+
+    Args:
+        url: ranking page URL. If it already ends in a page number (e.g.
+            `.../all-time-money-list/3`) that page is used as the start.
+        start_page: page to start at when `url` has no trailing page (default 1).
+        num_pages: how many consecutive pages to scrape from the start.
+        delay: seconds to pause between page loads.
+        fetch_profiles: if True, visit each player's profile page (reusing the
+            same browser) to fill `city_state` and `profiles` (social links).
+        profile_delay: seconds to pause between profile visits.
+        country: if set, keep only players from this country. Applied before the
+            profile phase so non-matching profiles aren't visited.
+
+    Returns:
+        List of {rank, name, country, earnings, profile_url, city_state, profiles} dicts.
+    """
+    driver = _new_undetected_driver()
+    if driver is None:
+        raise RuntimeError("undetected-chromedriver is required to scrape The Hendon Mob")
+
+    base, url_page = split_ranking_page(url)
+    # A page number in the URL wins; otherwise use start_page (default 1).
+    start = url_page if url_page else (int(start_page) if start_page else 1)
+    last = start + max(1, int(num_pages)) - 1
+
+    players = []
+    try:
+        page = start
+        while page <= last:
+            page_url = base + "/" if page == 1 else f"{base}/{page}"
+            html = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
+            if not html:
+                break
+            batch, has_next = _parse_money_list_page(html, page_url)
+            if not batch:
+                break
+            players.extend(batch)
+            if not has_next:
+                break
+            page += 1
+            time.sleep(delay)
+
+        if country:
+            players = [p for p in players if p.get("country") == country]
+
+        if fetch_profiles:
+            for p in players:
+                if not p.get("profile_url"):
+                    continue
+                # profiles always have a results table; wait on that to know the
+                # challenge cleared, then parse the (optional) location + socials.
+                prof_html = _load_via_driver(driver, p["profile_url"], ready_marker="<table")
+                if prof_html:
+                    city_state, profiles = _parse_profile_details(
+                        prof_html, p["profile_url"], p.get("country", "")
+                    )
+                    p["city_state"] = city_state
+                    p["profiles"] = profiles
+                time.sleep(profile_delay)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+    return players
+
+
+# Player-profile social menu links use class `menu_<platform>`; these are the
+# platforms we treat as social media (vs. menu_graphs, menu_g, etc.).
+_PROFILE_SOCIAL_PLATFORMS = ("twitter", "facebook", "instagram", "youtube", "tiktok", "twitch")
+
+
+def _parse_profile_details(html, profile_url, country=""):
+    """
+    Parse a player profile page → (city_state, social_links_dict).
+
+    city_state comes from the profile's Residence (falling back to Born) field;
+    the trailing country is trimmed since country has its own column. Social
+    links are the player's `menu_<platform>` links, returned as absolute Hendon
+    Mob URLs (the site routes them through its own /<platform>/<slug> redirect).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    city_state = ""
+    loc = soup.find("div", class_="player-profile-location")
+    if loc:
+        labels = loc.find_all("span", class_="player-profile-location__entry-label")
+        values = loc.find_all("span", class_="player-profile-location__entry-value")
+        pairs = {}
+        for label, value in zip(labels, values):
+            text_wrap = value.find("span", class_="text-wrap")
+            text = (text_wrap.get_text(strip=True) if text_wrap
+                    else value.get_text(" ", strip=True))
+            pairs[label.get_text(strip=True).rstrip(":").lower()] = text
+        city_state = pairs.get("residence") or pairs.get("born") or ""
+        if country and city_state.endswith(", " + country):
+            city_state = city_state[: -len(", " + country)]
+
+    profiles = {}
+    for a in soup.find_all("a", href=True):
+        classes = a.get("class") or []
+        for platform in _PROFILE_SOCIAL_PLATFORMS:
+            if f"menu_{platform}" in classes:
+                profiles[platform] = urljoin(profile_url, a["href"])
+
+    return city_state, profiles
+
+
+def _parse_money_list_page(html, page_url):
+    """Parse one money-list page → (list of player dicts, has_next_page bool)."""
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="table--ranking-list")
+    players = []
+    if table:
+        for tr in table.find_all("tr"):
+            place = tr.find("td", class_="place")
+            name_cell = tr.find("td", class_="name")
+            if not place or not name_cell:
+                continue  # header / non-player row
+            link = name_cell.find("a", href=True)
+            name = (link.get_text(strip=True) if link else name_cell.get_text(strip=True))
+            profile_url = urljoin(page_url, link["href"]) if link else None
+
+            flag = tr.find("td", class_="flag")
+            span = flag.find("span") if flag else None
+            country = (span.get("title") or span.get_text(strip=True)) if span else ""
+
+            prize = tr.find("td", class_="prize")
+            earnings = prize.get_text(strip=True).replace("\xa0", " ") if prize else ""
+
+            rank_digits = re.sub(r"\D", "", place.get_text())
+            players.append({
+                "rank": int(rank_digits) if rank_digits else None,
+                "name": name,
+                "country": country,
+                "earnings": earnings,
+                "profile_url": profile_url,
+                "city_state": "",
+                "profiles": {},
+            })
+
+    has_next = any(
+        a.get_text(strip=True).lower() == "next" for a in soup.find_all("a", href=True)
+    )
+    return players, has_next
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +380,7 @@ def _country_code_to_name(code):
 # ---------------------------------------------------------------------------
 
 def _fetch(url):
-    """Fetch using curl_cffi (Chrome TLS). Falls back to Playwright for JS-heavy pages."""
+    """Fetch using curl_cffi (Chrome TLS). Falls back to a real browser for JS-heavy pages."""
     try:
         from curl_cffi import requests as cffi_requests
         r = cffi_requests.get(url, impersonate="chrome120", timeout=30)
@@ -167,7 +390,87 @@ def _fetch(url):
                 return r.text
     except Exception:
         pass
+    # Some sites (e.g. The Hendon Mob's pokerdb subdomain) sit behind a
+    # Cloudflare "Just a moment" JS challenge that blocks both plain HTTP and
+    # headless automation. undetected-chromedriver run *headed* clears it;
+    # headless Chrome and Playwright get flagged, so they're only a last resort.
+    html = _fetch_undetected(url)
+    if html:
+        return html
     return _fetch_playwright(url)
+
+
+def _chrome_major_version():
+    """Major version of the installed Chrome, so uc fetches a matching driver. None → uc autodetects."""
+    import subprocess
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "google-chrome", "google-chrome-stable", "chromium-browser", "chromium",
+    ]
+    for path in candidates:
+        try:
+            out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout
+            m = re.search(r"\b(\d+)\.\d+", out)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            continue
+    return None
+
+
+def _new_undetected_driver():
+    """Create a headed undetected-chromedriver instance, or None if uc is unavailable."""
+    try:
+        import undetected_chromedriver as uc
+    except Exception:
+        return None
+    try:
+        return uc.Chrome(options=uc.ChromeOptions(), headless=False,
+                         version_main=_chrome_major_version())
+    except Exception:
+        return None
+
+
+def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30):
+    """
+    Navigate an existing uc driver to url and wait out any Cloudflare challenge.
+
+    Returns the page HTML once the "Just a moment" interstitial clears and
+    `ready_marker` appears, or None if it never resolves. Reusing one driver
+    across calls means Cloudflare is solved once and the session is kept warm.
+    """
+    try:
+        driver.get(url)
+        deadline = time.time() + wait_secs
+        while time.time() < deadline:
+            src = driver.page_source
+            low = src.lower()
+            if "just a moment" not in low and ready_marker.lower() in low:
+                return src
+            time.sleep(1)
+    except Exception:
+        return None
+    return None
+
+
+def _fetch_undetected(url, wait_secs=30):
+    """
+    Fetch a single Cloudflare-challenged page with undetected-chromedriver (headed).
+
+    Cloudflare's managed challenge flags headless browsers, so this runs with a
+    visible window. Returns the page HTML once the challenge clears and a table
+    appears, or None if uc is unavailable or the challenge never resolves.
+    """
+    driver = _new_undetected_driver()
+    if driver is None:
+        return None
+    try:
+        return _load_via_driver(driver, url, wait_secs=wait_secs)
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 def _fetch_playwright(url):
