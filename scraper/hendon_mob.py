@@ -42,12 +42,26 @@ Caveats for maintainers:
 """
 
 import json
+import random
 import re
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
+
+
+def _jittered_delay(base, spread=0.5):
+    """
+    Randomize a politeness pause so request timing doesn't look botlike.
+
+    A fixed gap between requests is itself a tell Cloudflare's heuristics key
+    on, and regular cadence is part of what escalates the passive challenge to
+    an interactive one. Returns a value uniformly in [base - spread, base + spread],
+    clamped at 0 — so the default base=1.0 / spread=0.5 yields pauses in
+    [0.5, 1.5]s. Bump `base` to widen the whole window.
+    """
+    return max(0.0, random.uniform(base - spread, base + spread))
 
 
 def scrape_leaderboard(url, us_only=True, months_active=12, max_players=50, openai_api_key=None):
@@ -115,7 +129,7 @@ def split_ranking_page(url):
 
 
 def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1, delay=1.0,
-                      fetch_profiles=False, profile_delay=0.3, country=None):
+                      fetch_profiles=False, profile_delay=1.0, country=None):
     """
     Scrape a Hendon Mob ranking list, one shot, for a small page range.
 
@@ -185,7 +199,7 @@ def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1,
                     p["profiles"] = profiles
                     p["last_cash_date"] = last_cash_date
                     p["recent_earnings"] = recent_earnings
-                time.sleep(profile_delay)
+                time.sleep(_jittered_delay(profile_delay))
     finally:
         try:
             driver.quit()
@@ -485,26 +499,69 @@ def _new_undetected_driver():
         return None
 
 
-def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30):
+def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30,
+                     challenge_wait_secs=0, challenge_refresh_secs=30,
+                     on_challenge=None):
     """
     Navigate an existing uc driver to url and wait out any Cloudflare challenge.
 
     Returns the page HTML once the "Just a moment" interstitial clears and
     `ready_marker` appears, or None if it never resolves. Reusing one driver
     across calls means Cloudflare is solved once and the session is kept warm.
+
+    Normally waits up to `wait_secs` for the page to render. If the "Just a
+    moment" interstitial is *still* up at that point and `challenge_wait_secs`
+    > 0, keeps waiting up to that many extra seconds before giving up —
+    Cloudflare's managed challenge occasionally stalls for many minutes — and
+    re-navigates to the URL every `challenge_refresh_secs` to nudge it into
+    re-evaluating. `on_challenge(elapsed_secs)` is called when the long wait
+    first kicks in and again on each nudge, so callers can report it. Callers
+    that can't afford a long stall (the roster walk) leave the default 0 and
+    keep the old fast-fail behaviour.
     """
     try:
         driver.get(url)
-        deadline = time.time() + wait_secs
-        while time.time() < deadline:
-            src = driver.page_source
-            low = src.lower()
-            if "just a moment" not in low and ready_marker.lower() in low:
-                return src
-            time.sleep(1)
     except Exception:
         return None
-    return None
+    started = time.time()
+    last_refresh = started
+    long_wait_started = None
+    while True:
+        try:
+            src = driver.page_source
+        except Exception:
+            return None
+        low = src.lower()
+        challenged = "just a moment" in low
+        if not challenged and ready_marker.lower() in low:
+            return src
+
+        now = time.time()
+        if now - started < wait_secs:
+            time.sleep(1)
+            continue
+
+        # Past the normal window. Only keep going if we're genuinely stuck on
+        # the Cloudflare interstitial and a long-challenge budget was granted;
+        # otherwise this is just an empty/slow page — fail fast as before.
+        if not (challenged and challenge_wait_secs > 0):
+            return None
+        if long_wait_started is None:
+            long_wait_started = now
+            last_refresh = now  # measure the refresh interval from the stall, not page load
+            if on_challenge:
+                on_challenge(0)
+        if now - long_wait_started > challenge_wait_secs:
+            return None  # rode it out for the whole budget and it never cleared
+        if now - last_refresh >= challenge_refresh_secs:
+            try:
+                driver.get(url)  # reload nudges the stalled challenge to re-evaluate
+            except Exception:
+                return None
+            last_refresh = now
+            if on_challenge:
+                on_challenge(round(now - long_wait_started))
+        time.sleep(2)
 
 
 def _fetch_undetected(url, wait_secs=30):

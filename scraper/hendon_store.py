@@ -39,6 +39,9 @@ def connect(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # safer concurrent reads while writing
+    conn.execute("PRAGMA busy_timeout=30000")  # wait up to 30s for the write lock
+    # instead of erroring, so two harvest processes (roster + profiles) can write
+    # concurrently without hitting "database is locked"
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS players (
@@ -110,16 +113,21 @@ def upsert_roster(conn: sqlite3.Connection, players: list[dict]) -> int:
 
 def pending_profiles(conn: sqlite3.Connection, limit: int | None = None,
                      country: str | None = None,
-                     refresh_after_days: int | None = None) -> list[sqlite3.Row]:
+                     refresh_after_days: int | None = None,
+                     min_rank: int | None = None) -> list[sqlite3.Row]:
     """
     Return the profile work queue: players not yet enriched (or stale).
 
     `country` restricts to one nationality (so we don't visit profiles we'll
     discard). `refresh_after_days` also re-queues rows last scraped longer ago
-    than that. `limit` caps the batch for incremental runs.
+    than that. `min_rank` skips players ranked above it (used to start the queue
+    partway down the list). `limit` caps the batch for incremental runs.
     """
     where = ["profile_url IS NOT NULL AND profile_url != ''"]
     params: list = []
+    if min_rank is not None:
+        where.append("rank >= ?")
+        params.append(min_rank)
     if refresh_after_days is not None:
         cutoff = (datetime.utcnow() - timedelta(days=refresh_after_days)).isoformat()
         where.append("(profile_scraped_at IS NULL OR profile_scraped_at < ?)")
