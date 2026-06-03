@@ -566,21 +566,17 @@ HTML = """
               <input id="lbUrl" name="lbUrl" placeholder="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" value="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" required autocomplete="off">
             </div>
             <div class="field">
-              <label for="lbMax">Max players</label>
-              <input id="lbMax" name="lbMax" type="number" min="10" max="200" value="50">
-            </div>
-            <div class="field">
               <label for="lbStartPage">Start page</label>
               <input id="lbStartPage" name="lbStartPage" type="number" min="1" value="1" title="Or put the page number in the URL, e.g. .../all-time-money-list/3">
             </div>
             <div class="field">
-              <label for="lbPages"># Pages (max 10)</label>
-              <select id="lbPages" name="lbPages">
-                <option value="1">1 page (~100)</option>
-                <option value="2">2 pages (~200)</option>
-                <option value="3">3 pages (~300)</option>
-                <option value="5">5 pages (~500)</option>
-                <option value="10">10 pages (~1000)</option>
+              <label for="lbPages">How many to scrape</label>
+              <select id="lbPages" name="lbPages" title="Each page returns about 100 players">
+                <option value="1">1 page · ~100 players</option>
+                <option value="2">2 pages · ~200 players</option>
+                <option value="3">3 pages · ~300 players</option>
+                <option value="5">5 pages · ~500 players</option>
+                <option value="10">10 pages · ~1000 players</option>
               </select>
             </div>
             <div class="field">
@@ -1304,7 +1300,6 @@ HTML = """
     document.getElementById('lbForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const url      = document.getElementById('lbUrl').value.trim();
-      const max      = parseInt(document.getElementById('lbMax').value) || 50;
       const months   = parseInt(document.getElementById('lbMonths').value);
       const usOnly    = document.getElementById('lbUsOnly').checked;
       const pages     = document.getElementById('lbPages').value;
@@ -1328,7 +1323,7 @@ HTML = """
         const res  = await fetch('/api/scrape-leaderboard', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, max_players: max, months_active: months, us_only: usOnly, pages, start_page: startPage, fetch_profiles: profiles }),
+          body: JSON.stringify({ url, months_active: months, us_only: usOnly, pages, start_page: startPage, fetch_profiles: profiles }),
         });
         const data = await res.json();
         if (data.error) {

@@ -7,16 +7,16 @@ no browser/web server needed, logs progress to stdout, Ctrl-C stops cleanly, and
 everything is durable in SQLite so re-running resumes where it left off.
 
     # walk the whole money list (roster) + enrich every US profile
-    python -m scraper.harvest run --us-only
+    python3 -m scraper.harvest run --us-only
 
     # incremental chunk: 50 roster pages, enrich 5000 profiles this run
-    python -m scraper.harvest run --pages 50 --limit 5000 --us-only
+    python3 -m scraper.harvest run --pages 50 --limit 5000 --us-only
 
     # progress snapshot from the cache
-    python -m scraper.harvest status
+    python3 -m scraper.harvest status
 
     # stream the handoff CSV (defaults to stdout)
-    python -m scraper.harvest export --us-only -o hendon_us.csv
+    python3 -m scraper.harvest export --us-only -o hendon_us.csv
 
 See scraper/hendon_mob.py's module docstring for the Cloudflare / headed-browser
 constraints (this still drives a visible Chrome — it just isn't tied to the UI).
@@ -69,13 +69,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     _log(f"Starting harvest — db={args.db} url={args.url}")
     _log(f"  roster={'on' if not args.no_roster else 'off'} "
          f"profiles={'on' if not args.no_profiles else 'off'} "
-         f"max_pages={max_pages} profile_limit={args.limit} country={country}")
+         f"pages={args.start_page}..{max_pages or 'end'} profile_limit={args.limit} country={country}")
 
     started = time.time()
     summary = hendon_harvest.harvest(
         db_path=args.db,
         url=args.url,
         max_pages=max_pages,
+        start_page=args.start_page,
         do_roster=not args.no_roster,
         do_profiles=not args.no_profiles,
         country=country,
@@ -188,7 +189,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="Harvest roster and/or profiles (resumable)")
     p_run.add_argument("--url", default=ALL_TIME_MONEY_LIST_URL, help="Ranking list URL")
-    p_run.add_argument("--pages", default="all", help="Roster pages to walk (int or 'all')")
+    p_run.add_argument("--pages", default="all", help="Walk roster up to this page number (int or 'all')")
+    p_run.add_argument("--start-page", type=int, default=1,
+                       help="Roster page to start from (skip earlier already-cached pages)")
     p_run.add_argument("--limit", type=int, default=None, help="Max profiles to enrich this run")
     p_run.add_argument("--us-only", action="store_true", help="Restrict profile enrichment to US players")
     p_run.add_argument("--no-roster", action="store_true", help="Skip the roster phase")

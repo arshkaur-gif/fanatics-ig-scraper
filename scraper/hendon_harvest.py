@@ -29,6 +29,7 @@ from .hendon_mob import (
 def harvest(db_path: str = store.DEFAULT_DB_PATH,
             url: str = ALL_TIME_MONEY_LIST_URL,
             max_pages: int | None = None,
+            start_page: int = 1,
             do_roster: bool = True,
             do_profiles: bool = True,
             country: str | None = None,
@@ -44,7 +45,9 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
     Args:
         db_path: SQLite cache file.
         url: ranking list to harvest.
-        max_pages: roster pages to walk; None = all.
+        max_pages: walk roster up to this page number; None = all.
+        start_page: roster page to start walking from (skip earlier pages
+            already cached — they'd only be re-upserted unchanged).
         do_roster / do_profiles: enable each phase independently.
         country: restrict the profile phase to one nationality.
         profile_limit: cap profiles enriched this run (incremental batches).
@@ -72,7 +75,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
         # ── Phase 1: roster ──────────────────────────────────────────────
         if do_roster and not stop_event.is_set():
             base = url.rstrip("/")
-            page = 1
+            page = max(1, start_page)
             while (max_pages is None or page <= max_pages) and not stop_event.is_set():
                 page_url = base + "/" if page == 1 else f"{base}/{page}"
                 html = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
