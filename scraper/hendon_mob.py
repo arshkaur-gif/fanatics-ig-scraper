@@ -39,6 +39,14 @@ Caveats for maintainers:
     from the passive managed challenge to an interactive Turnstile/CAPTCHA, which
     uc cannot silently solve. The `delay` / `profile_delay` pauses exist to stay
     under that threshold — keep them.
+  - The clearance is time-boxed. The cf_clearance cookie expires on a fixed
+    ~20-minute clock regardless of how polite the traffic is; when it lapses the
+    challenge returns, sometimes as the escalated interactive variant ("Performing
+    security verification… why is this verification taking longer?") that a
+    refresh can't clear. The fix isn't delay tuning — it's a fresh session. The
+    long-running harvest loops recycle the driver on a timer (see
+    `_recycle_driver` and hendon_harvest), and `_load_via_driver` recycles
+    reactively if it gets stuck on a challenge.
 """
 
 import json
@@ -169,7 +177,7 @@ def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1,
         page = start
         while page <= last:
             page_url = base + "/" if page == 1 else f"{base}/{page}"
-            html = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
+            html, _ = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
             if not html:
                 break
             batch, has_next = _parse_money_list_page(html, page_url)
@@ -190,7 +198,7 @@ def scrape_money_list(url=ALL_TIME_MONEY_LIST_URL, start_page=None, num_pages=1,
                     continue
                 # profiles always have a results table; wait on that to know the
                 # challenge cleared, then parse the (optional) location + socials.
-                prof_html = _load_via_driver(driver, p["profile_url"], ready_marker="<table")
+                prof_html, _ = _load_via_driver(driver, p["profile_url"], ready_marker="<table")
                 if prof_html:
                     city_state, profiles, last_cash_date, recent_earnings = _parse_profile_details(
                         prof_html, p["profile_url"], p.get("country", "")
@@ -486,6 +494,27 @@ def _chrome_major_version():
     return None
 
 
+# Cloudflare interstitial copy. The passive managed challenge shows "just a
+# moment"; when it escalates to the slower interactive check the wording changes
+# to "performing security verification" / "why is this verification taking
+# longer". Same wall, different copy — we have to match all of them, or the
+# escalated page reads as a plain empty load and we fast-fail instead of
+# recovering from it.
+_CF_CHALLENGE_MARKERS = (
+    "just a moment",
+    "performing security verification",
+    "verification taking longer",
+    "verifies you are not a bot",
+    "needs to review the security of your connection",
+)
+
+
+def _is_cf_challenge(page_source: str) -> bool:
+    """True if page_source is any of Cloudflare's challenge interstitials."""
+    low = page_source.lower()
+    return any(m in low for m in _CF_CHALLENGE_MARKERS)
+
+
 def _new_undetected_driver():
     """Create a headed undetected-chromedriver instance, or None if uc is unavailable."""
     try:
@@ -499,42 +528,70 @@ def _new_undetected_driver():
         return None
 
 
+def _recycle_driver(driver):
+    """Quit a stale/flagged driver and return a fresh headed session (or None).
+
+    The cf_clearance cookie that gets us past the challenge expires on a fixed
+    ~20-minute clock, and once Cloudflare escalates to the interactive check a
+    refresh only restarts it (the page says so). Either way the fix is the same:
+    drop the session and start a clean one, which re-runs the passive check and
+    earns a fresh clearance. Recycling beats both refreshing and tuning the
+    politeness delays here — the trigger is a clock, not request rate.
+    """
+    try:
+        if driver is not None:
+            driver.quit()
+    except Exception:
+        pass
+    return _new_undetected_driver()
+
+
 def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30,
                      challenge_wait_secs=0, challenge_refresh_secs=30,
-                     on_challenge=None):
+                     on_challenge=None, recycle_cb=None):
     """
     Navigate an existing uc driver to url and wait out any Cloudflare challenge.
 
-    Returns the page HTML once the "Just a moment" interstitial clears and
-    `ready_marker` appears, or None if it never resolves. Reusing one driver
-    across calls means Cloudflare is solved once and the session is kept warm.
+    Returns (html, driver). `html` is the page source once the interstitial
+    clears and `ready_marker` appears, or None if it never resolves. `driver` is
+    the session to keep using: normally the one passed in, but if a stalled
+    challenge forced a recycle (see below) it's the *fresh* driver — callers
+    must reassign their handle from the return value. Reusing one driver across
+    calls means Cloudflare is solved once and the session is kept warm.
 
-    Normally waits up to `wait_secs` for the page to render. If the "Just a
-    moment" interstitial is *still* up at that point and `challenge_wait_secs`
-    > 0, keeps waiting up to that many extra seconds before giving up —
-    Cloudflare's managed challenge occasionally stalls for many minutes — and
-    re-navigates to the URL every `challenge_refresh_secs` to nudge it into
-    re-evaluating. `on_challenge(elapsed_secs)` is called when the long wait
-    first kicks in and again on each nudge, so callers can report it. Callers
-    that can't afford a long stall (the roster walk) leave the default 0 and
-    keep the old fast-fail behaviour.
+    Normally waits up to `wait_secs` for the page to render. If a challenge
+    interstitial is *still* up at that point and `challenge_wait_secs` > 0, keeps
+    waiting up to that many extra seconds before giving up — Cloudflare's
+    challenge occasionally stalls for minutes. Every `challenge_refresh_secs` it
+    nudges the stall: if `recycle_cb` is given it swaps in a fresh driver
+    (`recycle_cb(old) -> new`), otherwise it re-navigates the same one. Recycling
+    is the right move for the *escalated* interactive challenge — refreshing that
+    one only restarts it — so the profile phase passes a recycle_cb.
+    `on_challenge(elapsed_secs)` is called when the long wait first kicks in and
+    again on each nudge, so callers can report it. Callers that can't afford a
+    long stall (the roster walk) leave the default 0 and keep the fast-fail
+    behaviour.
     """
-    try:
-        driver.get(url)
-    except Exception:
-        return None
+    def _go(d):
+        try:
+            d.get(url)
+            return True
+        except Exception:
+            return False
+
+    if driver is None or not _go(driver):
+        return None, driver
     started = time.time()
-    last_refresh = started
+    last_nudge = started
     long_wait_started = None
     while True:
         try:
             src = driver.page_source
         except Exception:
-            return None
-        low = src.lower()
-        challenged = "just a moment" in low
-        if not challenged and ready_marker.lower() in low:
-            return src
+            return None, driver
+        challenged = _is_cf_challenge(src)
+        if not challenged and ready_marker.lower() in src.lower():
+            return src, driver
 
         now = time.time()
         if now - started < wait_secs:
@@ -545,20 +602,23 @@ def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30,
         # the Cloudflare interstitial and a long-challenge budget was granted;
         # otherwise this is just an empty/slow page — fail fast as before.
         if not (challenged and challenge_wait_secs > 0):
-            return None
+            return None, driver
         if long_wait_started is None:
             long_wait_started = now
-            last_refresh = now  # measure the refresh interval from the stall, not page load
+            last_nudge = now  # measure the nudge interval from the stall, not page load
             if on_challenge:
                 on_challenge(0)
         if now - long_wait_started > challenge_wait_secs:
-            return None  # rode it out for the whole budget and it never cleared
-        if now - last_refresh >= challenge_refresh_secs:
-            try:
-                driver.get(url)  # reload nudges the stalled challenge to re-evaluate
-            except Exception:
-                return None
-            last_refresh = now
+            return None, driver  # rode it out for the whole budget and it never cleared
+        if now - last_nudge >= challenge_refresh_secs:
+            if recycle_cb is not None:
+                driver = recycle_cb(driver)  # fresh session earns a fresh clearance
+                started = now                # give the new session a full wait_secs window
+                if driver is None or not _go(driver):
+                    return None, driver
+            elif not _go(driver):            # no recycler: re-nav nudges a passive blip
+                return None, driver
+            last_nudge = now
             if on_challenge:
                 on_challenge(round(now - long_wait_started))
         time.sleep(2)
@@ -576,7 +636,8 @@ def _fetch_undetected(url, wait_secs=30):
     if driver is None:
         return None
     try:
-        return _load_via_driver(driver, url, wait_secs=wait_secs)
+        html, _ = _load_via_driver(driver, url, wait_secs=wait_secs)
+        return html
     finally:
         try:
             driver.quit()

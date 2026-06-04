@@ -25,6 +25,7 @@ from .hendon_mob import (
     _new_undetected_driver,
     _parse_money_list_page,
     _parse_profile_details,
+    _recycle_driver,
 )
 
 
@@ -55,8 +56,9 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             refresh_after_days: int | None = None,
             page_delay: float = 1.0,
             page_retries: int = 3,
-            profile_delay: float = 1.0,
+            profile_delay: float = 0.6,
             challenge_wait_secs: int = 2700,
+            recycle_secs: int = 900,
             progress_cb=None,
             stop_event: threading.Event | None = None) -> dict:
     """
@@ -78,17 +80,24 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
         refresh_after_days: also re-enrich rows older than this many days.
         page_delay / profile_delay: politeness pauses (keep them — see docstring).
             profile_delay is the *center* of a jittered pause (±0.5s, so the
-            default 1.0 means each gap is a random 0.5–1.5s); randomized timing
+            default 0.6 means each gap is a random 0.1–1.1s); randomized timing
             avoids the regular cadence that helps escalate the challenge.
         page_retries: how many times to re-load a roster page that comes back
             empty before deciding the list has ended (rides out Cloudflare blips
             so one flaky load doesn't truncate a multi-thousand-page walk).
-        challenge_wait_secs: how long to ride out a stalled Cloudflare "Just a
-            moment" challenge during the profile phase before skipping that
-            profile. Cloudflare occasionally sits on the interstitial for 30+
-            minutes; rather than blow through the whole enrich queue getting
-            nothing, we wait it out (re-navigating to nudge it) and resume. The
+        challenge_wait_secs: how long to ride out a stalled Cloudflare challenge
+            during the profile phase before skipping that profile. Cloudflare
+            occasionally sits on the interstitial for 30+ minutes; rather than
+            blow through the whole enrich queue getting nothing, we wait it out
+            (recycling the driver to nudge it — see recycle_secs) and resume. The
             roster phase doesn't use this — a blip there just retries the page.
+        recycle_secs: recreate the browser session every this many seconds during
+            the profile phase. The cf_clearance cookie expires on a fixed
+            ~20-minute clock, so a long-lived session eventually hits the
+            challenge (often the escalated variant a refresh can't clear); a fresh
+            session before that point earns a fresh clearance and avoids the wall.
+            0 disables proactive recycling (reactive recycle on a stall still
+            applies). Default 900 (15m), comfortably under the ~20m expiry.
         progress_cb: optional callable(dict) invoked as progress changes.
         stop_event: optional threading.Event; set it to stop cleanly.
 
@@ -103,6 +112,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
     driver = _new_undetected_driver()
     if driver is None:
         raise RuntimeError("undetected-chromedriver is required to harvest The Hendon Mob")
+    driver_started = time.time()
     conn = store.connect(db_path)
 
     roster_added = 0
@@ -127,7 +137,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
                 for attempt in range(1, page_retries + 1):
                     if stop_event.is_set():
                         break
-                    html = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
+                    html, _ = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
                     if html:
                         batch, _ = _parse_money_list_page(html, page_url)
                         if batch:
@@ -192,11 +202,31 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
                                queue_total=total_queue, stop_name=row["name"],
                                stop_earnings=row["earnings"], **store.counts(conn, country))
                         break
+                # Pre-empt the cf_clearance cookie's ~20m expiry: swap in a fresh
+                # session on a timer so the challenge (esp. the escalated variant)
+                # rarely fires mid-queue. Done between profiles, in the politeness
+                # gap, so it costs only the one-time passive re-clear (~8s).
+                if recycle_secs and time.time() - driver_started > recycle_secs:
+                    driver = _recycle_driver(driver)
+                    driver_started = time.time()
+                    report(phase="driver_recycled", reason="scheduled", queue_done=i - 1,
+                           queue_total=total_queue, **store.counts(conn, country))
+                    if driver is None:
+                        break
+
                 def on_cf(elapsed, _done=i - 1):
                     report(phase="cloudflare_wait", elapsed=elapsed, queue_done=_done,
                            queue_total=total_queue, **store.counts(conn, country))
-                html = _load_via_driver(driver, row["profile_url"], ready_marker="<table",
-                                        challenge_wait_secs=challenge_wait_secs, on_challenge=on_cf)
+                prev_driver = driver
+                html, driver = _load_via_driver(
+                    driver, row["profile_url"], ready_marker="<table",
+                    challenge_wait_secs=challenge_wait_secs, on_challenge=on_cf,
+                    recycle_cb=_recycle_driver,
+                )
+                if driver is None:
+                    break  # recycle couldn't bring up a fresh session — stop cleanly
+                if driver is not prev_driver:
+                    driver_started = time.time()  # reactive recycle reset the clock
                 if html:
                     city_state, profiles, last_cash_date, recent_earnings = _parse_profile_details(
                         html, row["profile_url"], row["country"] or ""
@@ -225,8 +255,9 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
 def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
                      country: str | None = None,
                      limit: int | None = None,
-                     profile_delay: float = 1.0,
+                     profile_delay: float = 0.6,
                      challenge_wait_secs: int = 2700,
+                     recycle_secs: int = 900,
                      progress_cb=None,
                      stop_event: threading.Event | None = None) -> dict:
     """
@@ -246,6 +277,7 @@ def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
     driver = _new_undetected_driver()
     if driver is None:
         raise RuntimeError("undetected-chromedriver is required to harvest The Hendon Mob")
+    driver_started = time.time()
     conn = store.connect(db_path)
 
     done = 0
@@ -255,11 +287,27 @@ def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
         for i, row in enumerate(queue, 1):
             if stop_event.is_set():
                 break
+            # See harvest(): recycle ahead of the ~20m cf_clearance expiry.
+            if recycle_secs and time.time() - driver_started > recycle_secs:
+                driver = _recycle_driver(driver)
+                driver_started = time.time()
+                report(phase="driver_recycled", reason="scheduled", queue_done=i - 1,
+                       queue_total=total_queue)
+                if driver is None:
+                    break
             def on_cf(elapsed, _done=i - 1):
                 report(phase="cloudflare_wait", elapsed=elapsed, queue_done=_done,
                        queue_total=total_queue)
-            html = _load_via_driver(driver, row["profile_url"], ready_marker="<table",
-                                    challenge_wait_secs=challenge_wait_secs, on_challenge=on_cf)
+            prev_driver = driver
+            html, driver = _load_via_driver(
+                driver, row["profile_url"], ready_marker="<table",
+                challenge_wait_secs=challenge_wait_secs, on_challenge=on_cf,
+                recycle_cb=_recycle_driver,
+            )
+            if driver is None:
+                break
+            if driver is not prev_driver:
+                driver_started = time.time()
             if html:
                 _, _, last_cash_date, recent_earnings = _parse_profile_details(
                     html, row["profile_url"], row["country"] or ""

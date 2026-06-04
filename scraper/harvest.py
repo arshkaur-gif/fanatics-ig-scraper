@@ -80,7 +80,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                  f"stopping profile enrichment ({p.get('queue_done', 0)} done this run)")
         elif phase == "cloudflare_wait":
             mins = round(p.get("elapsed", 0) / 60, 1)
-            _log(f"Cloudflare challenge stalled — riding it out (refreshing), {mins}m in "
+            _log(f"Cloudflare challenge stalled — recycling the browser session, {mins}m in "
+                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+        elif phase == "driver_recycled":
+            _log(f"Recycled browser session ({p.get('reason', '')}) ahead of clearance expiry "
                  f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
         last["phase"] = phase
 
@@ -103,6 +106,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         min_earnings=args.min_earnings,
         refresh_after_days=args.refresh_after,
         challenge_wait_secs=int(args.challenge_wait * 60),
+        recycle_secs=int(args.recycle_mins * 60),
         progress_cb=progress,
         stop_event=stop_event,
     )
@@ -133,7 +137,11 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     def progress(p):
         if p.get("phase") == "cloudflare_wait":
             mins = round(p.get("elapsed", 0) / 60, 1)
-            _log(f"Cloudflare challenge stalled — riding it out (refreshing), {mins}m in "
+            _log(f"Cloudflare challenge stalled — recycling the browser session, {mins}m in "
+                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+            return
+        if p.get("phase") == "driver_recycled":
+            _log(f"Recycled browser session ({p.get('reason', '')}) ahead of clearance expiry "
                  f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
             return
         done = p.get("queue_done", 0)
@@ -149,7 +157,8 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     started = time.time()
     summary = hendon_harvest.backfill_results(
         db_path=args.db, country=country, limit=args.limit,
-        challenge_wait_secs=int(args.challenge_wait * 60), progress_cb=progress,
+        challenge_wait_secs=int(args.challenge_wait * 60),
+        recycle_secs=int(args.recycle_mins * 60), progress_cb=progress,
         stop_event=stop_event,
     )
     _log(f"{'STOPPED' if summary['stopped'] else 'DONE'} in {round(time.time() - started, 1)}s — "
@@ -236,6 +245,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--challenge-wait", type=float, default=45,
                        help="Minutes to ride out a stalled Cloudflare challenge during the "
                             "profile phase before skipping a profile (default 45; 0 = fail fast)")
+    p_run.add_argument("--recycle-mins", type=float, default=15,
+                       help="Recreate the browser session every N minutes during the profile "
+                            "phase, ahead of the ~20m cf_clearance expiry (default 15; 0 = off)")
     p_run.set_defaults(func=cmd_run)
 
     p_backfill = sub.add_parser("backfill",
@@ -245,6 +257,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_backfill.add_argument("--challenge-wait", type=float, default=45,
                             help="Minutes to ride out a stalled Cloudflare challenge before "
                                  "skipping a profile (default 45; 0 = fail fast)")
+    p_backfill.add_argument("--recycle-mins", type=float, default=15,
+                            help="Recreate the browser session every N minutes, ahead of the "
+                                 "~20m cf_clearance expiry (default 15; 0 = off)")
     p_backfill.set_defaults(func=cmd_backfill)
 
     p_status = sub.add_parser("status", help="Print cache counts")
