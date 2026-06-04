@@ -44,6 +44,13 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _where(p: dict) -> str:
+    """Locate a progress event: roster page if present, else profile queue position."""
+    if p.get("page") is not None:
+        return f"page {p['page']}"
+    return f"{p.get('queue_done', 0)}/{p.get('queue_total', 0)}"
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     country = "United States" if args.us_only else None
     max_pages = None if str(args.pages).lower() == "all" else int(args.pages)
@@ -81,10 +88,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         elif phase == "cloudflare_wait":
             mins = round(p.get("elapsed", 0) / 60, 1)
             _log(f"Cloudflare challenge stalled — recycling the browser session, {mins}m in "
-                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+                 f"(at {_where(p)} this run)")
         elif phase == "driver_recycled":
             _log(f"Recycled browser session ({p.get('reason', '')}) ahead of clearance expiry "
-                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+                 f"(at {_where(p)} this run)")
         last["phase"] = phase
 
     _log(f"Starting harvest — db={args.db} url={args.url}")
@@ -138,11 +145,11 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         if p.get("phase") == "cloudflare_wait":
             mins = round(p.get("elapsed", 0) / 60, 1)
             _log(f"Cloudflare challenge stalled — recycling the browser session, {mins}m in "
-                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+                 f"(at {_where(p)} this run)")
             return
         if p.get("phase") == "driver_recycled":
             _log(f"Recycled browser session ({p.get('reason', '')}) ahead of clearance expiry "
-                 f"(at {p.get('queue_done', 0)}/{p.get('queue_total', 0)} this run)")
+                 f"(at {_where(p)} this run)")
             return
         done = p.get("queue_done", 0)
         if done == 1 or done % 25 == 0 or done == p.get("queue_total"):

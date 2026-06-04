@@ -547,7 +547,7 @@ def _recycle_driver(driver):
 
 
 def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30,
-                     challenge_wait_secs=0, challenge_refresh_secs=30,
+                     challenge_wait_secs=0, challenge_refresh_secs=10,
                      on_challenge=None, recycle_cb=None):
     """
     Navigate an existing uc driver to url and wait out any Cloudflare challenge.
@@ -595,7 +595,7 @@ def _load_via_driver(driver, url, ready_marker="<table", wait_secs=30,
 
         now = time.time()
         if now - started < wait_secs:
-            time.sleep(1)
+            time.sleep(0.25)  # fine poll: return as soon as the page renders
             continue
 
         # Past the normal window. Only keep going if we're genuinely stuck on

@@ -56,7 +56,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             refresh_after_days: int | None = None,
             page_delay: float = 1.0,
             page_retries: int = 3,
-            profile_delay: float = 0.6,
+            profile_delay: float = 0.35,
             challenge_wait_secs: int = 2700,
             recycle_secs: int = 900,
             progress_cb=None,
@@ -79,9 +79,10 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             below it — we stop rather than keep visiting profiles we don't want.
         refresh_after_days: also re-enrich rows older than this many days.
         page_delay / profile_delay: politeness pauses (keep them — see docstring).
-            profile_delay is the *center* of a jittered pause (±0.5s, so the
-            default 0.6 means each gap is a random 0.1–1.1s); randomized timing
-            avoids the regular cadence that helps escalate the challenge.
+            profile_delay is the *center* of a jittered pause (±0.5s, clamped
+            at 0, so the default 0.35 means each gap is a random 0–0.85s);
+            randomized timing avoids the regular cadence that helps escalate
+            the challenge.
         page_retries: how many times to re-load a roster page that comes back
             empty before deciding the list has ended (rides out Cloudflare blips
             so one flaky load doesn't truncate a multi-thousand-page walk).
@@ -133,11 +134,40 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             while (max_pages is None or page <= max_pages) and not stop_event.is_set():
                 page_url = base + "/" if page == 1 else f"{base}/{page}"
 
+                # Recycle ahead of the ~20m cf_clearance expiry (see profile
+                # phase). Without it the walk hits the challenge mid-list, every
+                # retry fast-fails, and the empty page reads as "end of list" —
+                # silently truncating the roster above the earnings floor.
+                if recycle_secs and time.time() - driver_started > recycle_secs:
+                    driver = _recycle_driver(driver)
+                    driver_started = time.time()
+                    report(phase="driver_recycled", reason="scheduled", page=page,
+                           roster_added=roster_added)
+                    if driver is None:
+                        break
+
+                def on_cf(elapsed, _page=page):
+                    report(phase="cloudflare_wait", elapsed=elapsed, page=_page,
+                           roster_added=roster_added)
+
                 batch = None
                 for attempt in range(1, page_retries + 1):
                     if stop_event.is_set():
                         break
-                    html, _ = _load_via_driver(driver, page_url, ready_marker="table--ranking-list")
+                    prev_driver = driver
+                    # Challenge-aware: ride out / recycle a real Cloudflare block
+                    # instead of fast-failing into a false roster_end. A genuine
+                    # empty end-of-list page isn't a challenge, so it still fails
+                    # fast and ends the walk correctly.
+                    html, driver = _load_via_driver(
+                        driver, page_url, ready_marker="table--ranking-list",
+                        challenge_wait_secs=challenge_wait_secs,
+                        on_challenge=on_cf, recycle_cb=_recycle_driver,
+                    )
+                    if driver is None:
+                        break
+                    if driver is not prev_driver:
+                        driver_started = time.time()
                     if html:
                         batch, _ = _parse_money_list_page(html, page_url)
                         if batch:
@@ -145,6 +175,9 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
                     report(phase="roster_retry", page=page, attempt=attempt,
                            retries=page_retries, roster_added=roster_added)
                     time.sleep(page_delay * attempt)  # simple backoff
+
+                if driver is None:
+                    break  # recycle couldn't bring up a fresh session — stop cleanly
 
                 if not batch:
                     # No players after every retry: treat as the end of the list
@@ -255,7 +288,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
 def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
                      country: str | None = None,
                      limit: int | None = None,
-                     profile_delay: float = 0.6,
+                     profile_delay: float = 0.35,
                      challenge_wait_secs: int = 2700,
                      recycle_secs: int = 900,
                      progress_cb=None,
