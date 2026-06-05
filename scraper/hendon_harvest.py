@@ -56,7 +56,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             refresh_after_days: int | None = None,
             page_delay: float = 1.0,
             page_retries: int = 3,
-            profile_delay: float = 0.35,
+            profile_delay: float = 0.2,
             challenge_wait_secs: int = 2700,
             recycle_secs: int = 900,
             progress_cb=None,
@@ -79,10 +79,11 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
             below it — we stop rather than keep visiting profiles we don't want.
         refresh_after_days: also re-enrich rows older than this many days.
         page_delay / profile_delay: politeness pauses (keep them — see docstring).
-            profile_delay is the *center* of a jittered pause (±0.5s, clamped
-            at 0, so the default 0.35 means each gap is a random 0–0.85s);
-            randomized timing avoids the regular cadence that helps escalate
-            the challenge.
+            profile_delay is the *center* of a jittered pause (±0.2s, so the
+            default 0.2 means each gap is a random 0–0.4s); the spread is kept
+            equal to the base so the window bottoms out at 0 without piling up
+            zero-delay requests — randomized timing avoids the regular cadence
+            that helps escalate the challenge.
         page_retries: how many times to re-load a roster page that comes back
             empty before deciding the list has ended (rides out Cloudflare blips
             so one flaky load doesn't truncate a multi-thousand-page walk).
@@ -269,7 +270,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
                 profiles_done = i
                 report(phase="profiles", queue_done=i, queue_total=total_queue,
                        **store.counts(conn, country))
-                time.sleep(_jittered_delay(profile_delay))
+                time.sleep(_jittered_delay(profile_delay, spread=profile_delay))
     finally:
         try:
             driver.quit()
@@ -288,7 +289,7 @@ def harvest(db_path: str = store.DEFAULT_DB_PATH,
 def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
                      country: str | None = None,
                      limit: int | None = None,
-                     profile_delay: float = 0.35,
+                     profile_delay: float = 0.2,
                      challenge_wait_secs: int = 2700,
                      recycle_secs: int = 900,
                      progress_cb=None,
@@ -348,7 +349,7 @@ def backfill_results(db_path: str = store.DEFAULT_DB_PATH,
                 store.save_results(conn, row["player_id"], last_cash_date, recent_earnings)
             done = i
             report(phase="backfill", queue_done=i, queue_total=total_queue)
-            time.sleep(_jittered_delay(profile_delay))
+            time.sleep(_jittered_delay(profile_delay, spread=profile_delay))
     finally:
         try:
             driver.quit()
