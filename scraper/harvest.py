@@ -188,7 +188,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     country = "United States" if args.us_only else None
-    out = open(args.output, "w", newline="") if args.output else sys.stdout
+    # A "page" is 100 players by rank (page 1 → ranks 1..100), matching how the
+    # roster is paginated. Default the filename to the page when none is given.
+    output = args.output
+    if args.page is not None and output is None:
+        output = f"hendon_page_{args.page}.csv"
+    out = open(output, "w", newline="") if output else sys.stdout
     try:
         writer = csv.writer(out)
         writer.writerow(["rank", "name", "country", "earnings", "recent_earnings",
@@ -201,6 +206,9 @@ def cmd_export(args: argparse.Namespace) -> int:
             params.append(country)
         if args.scraped_only:
             where.append("profile_scraped_at IS NOT NULL")
+        if args.page is not None:
+            where.append("rank BETWEEN ? AND ?")
+            params.extend([(args.page - 1) * 100 + 1, args.page * 100])
         sql = ("SELECT rank, name, country, earnings, recent_earnings, last_cash_date, "
                "city_state, profile_url, profiles, profile_scraped_at FROM players")
         if where:
@@ -219,10 +227,10 @@ def cmd_export(args: argparse.Namespace) -> int:
             n += 1
         conn.close()
     finally:
-        if args.output:
+        if output:
             out.close()
-    if args.output:
-        _log(f"Wrote {n} rows to {args.output}")
+    if output:
+        _log(f"Wrote {n} rows to {output}")
     return 0
 
 
@@ -274,6 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_export = sub.add_parser("export", help="Stream cached players to CSV")
     p_export.add_argument("-o", "--output", default=None, help="Output file (default: stdout)")
+    p_export.add_argument("--page", type=int, default=None,
+                          help="Export just one page (100 players by rank, e.g. --page 998 "
+                               "→ ranks 99701..99800). Writes to hendon_page_<n>.csv unless -o is given.")
     p_export.add_argument("--us-only", action="store_true", help="Only US players")
     p_export.add_argument("--scraped-only", action="store_true", help="Only enriched players")
     p_export.set_defaults(func=cmd_export)
