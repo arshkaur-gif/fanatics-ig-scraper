@@ -3,16 +3,16 @@ Flask web UI for the scraping toolkit. Single-file app: the HTML/CSS/JS frontend
 is the `HTML` string below, served at `/`, and the JSON API routes are at the
 bottom of this file.
 
-Three tabs / API routes:
-  - Leaderboards (/api/scrape-leaderboard) — the Hendon Mob / WSOP rankings
-    scraper. The main tool; needs no API key for Hendon Mob. See scraper/.
+Tabs / API routes (all backed by hosted APIs — no local browser, Vercel-safe):
+  - Leaderboards (/api/hendon-leaderboard) — reads the curated Hendon Mob US
+    player dataset from Airtable. Needs AIRTABLE_API_KEY + AIRTABLE_BASE_ID.
   - Instagram (/api/scrape, /api/profile-details) — Apify-backed follower and
     profile scraping. Needs APIFY_API_TOKEN.
   - Contact enrichment (/api/enrich-contacts) — find emails/socials for players.
     Needs APIFY_API_TOKEN and/or OPENAI_API_KEY. See enrichment/.
 
-The UI does bounded, interactive pulls; for the full multi-day Hendon Mob
-harvest use the CLI instead (`python3 -m scraper.harvest`).
+The live browser-based Hendon Mob scraper (full multi-day harvest, headed-Chrome
+URL scraping) lives on the `hendon-scraper` branch — it can't run on serverless.
 """
 
 import os
@@ -28,10 +28,6 @@ app = Flask(__name__)
 
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
-
-# The Leaderboard UI scrapes a bounded page range; the full multi-day harvest
-# is the CLI's job (scraper.harvest).
-MAX_UI_PAGES = 10
 
 # Approximate Apify pricing per result (used for client-side cost preview)
 COST_PER_FOLLOWER = 0.002
@@ -582,62 +578,6 @@ HTML = """
 
     <!-- Leaderboard tab -->
     <div id="lbTab" style="display:none;">
-      <div class="lb-mode">
-        <button type="button" class="mode-btn active" data-mode="hm" onclick="switchLbMode('hm')">Hendon Mob database</button>
-        <button type="button" class="mode-btn" data-mode="url" onclick="switchLbMode('url')">Scrape a URL</button>
-      </div>
-
-      <section class="hero" id="lbUrlMode" style="display:none;">
-        <h1>Scrape a leaderboard</h1>
-        <p>Pull player data from any public rankings page. Filter by country and activity, then export to CSV.</p>
-        <form id="lbForm">
-          <div class="lb-form-grid">
-            <div class="field">
-              <label for="lbUrl">Leaderboard URL</label>
-              <input id="lbUrl" name="lbUrl" placeholder="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" value="https://pokerdb.thehendonmob.com/ranking/all-time-money-list/" required autocomplete="off">
-            </div>
-            <div class="field">
-              <label for="lbStartPage">Start page</label>
-              <input id="lbStartPage" name="lbStartPage" type="number" min="1" value="1" title="Or put the page number in the URL, e.g. .../all-time-money-list/3">
-            </div>
-            <div class="field">
-              <label for="lbPages">How many to scrape</label>
-              <select id="lbPages" name="lbPages" title="Each page returns about 100 players">
-                <option value="1">1 page · ~100 players</option>
-                <option value="2">2 pages · ~200 players</option>
-                <option value="3">3 pages · ~300 players</option>
-                <option value="5">5 pages · ~500 players</option>
-                <option value="10">10 pages · ~1000 players</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="lbMonths">Active within</label>
-              <select id="lbMonths" name="lbMonths">
-                <option value="12">1 year</option>
-                <option value="24">2 years</option>
-                <option value="36">3 years</option>
-                <option value="0">Any time</option>
-              </select>
-            </div>
-            <button type="submit" id="lbBtn" class="btn btn-primary">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-              Scrape
-            </button>
-          </div>
-          <div class="lb-meta">
-            <label>
-              <input type="checkbox" id="lbUsOnly" checked> US players only
-            </label>
-            <span class="dim">·</span>
-            <label>
-              <input type="checkbox" id="lbProfiles"> Visit each profile for city/state &amp; social links
-            </label>
-            <span class="dim">·</span>
-            <span class="dim">Profile visits add ~3s per player. A page number in the URL overrides “Start page”. For the full list use the harvest CLI.</span>
-          </div>
-        </form>
-      </section>
-
       <section class="hero" id="hmPanel">
         <h1>Hendon Mob database</h1>
         <p>Query the curated US player dataset. Set any filters (or none for the whole list), then export to CSV.</p>
@@ -1338,13 +1278,6 @@ HTML = """
       document.getElementById('brandSub').textContent = subs[tab] || '';
     }
 
-    // ── Leaderboard source mode (Hendon Mob database vs URL scrape) ───────────
-    function switchLbMode(mode) {
-      document.getElementById('hmPanel').style.display    = mode === 'hm'  ? '' : 'none';
-      document.getElementById('lbUrlMode').style.display  = mode === 'url' ? '' : 'none';
-      document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-    }
-
     // Build the Hendon Mob filter fields (kept in JS so the long state list
     // stays out of the page markup).
     const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
@@ -1437,57 +1370,8 @@ HTML = """
       }
     });
 
-    // ── Leaderboard scraper ──────────────────────────────────────────────────
+    // ── Leaderboard data (populated by the Hendon Mob database form) ─────────
     let lbData = [];
-
-    document.getElementById('lbForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const url      = document.getElementById('lbUrl').value.trim();
-      const months   = parseInt(document.getElementById('lbMonths').value);
-      const usOnly    = document.getElementById('lbUsOnly').checked;
-      const pages     = document.getElementById('lbPages').value;
-      const startPage = parseInt(document.getElementById('lbStartPage').value) || 1;
-      const profiles  = document.getElementById('lbProfiles').checked;
-
-      const isHendon = url.includes('thehendonmob.com');
-      const btn    = document.getElementById('lbBtn');
-      const status = document.getElementById('lbStatus');
-      btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> Scraping';
-      status.className = 'status visible';
-      const waitMsg = isHendon
-        ? ('Scraping The Hendon Mob — a Chrome window will open to clear the Cloudflare check. ~7s per page'
-           + (profiles ? ', plus ~3s per player for profile details.' : '.'))
-        : 'Scraping leaderboard and player profiles — this may take 30–90 seconds...';
-      status.innerHTML = `<span class="spinner"></span><span>${waitMsg}</span>`;
-      document.getElementById('lbResultsCard').classList.remove('visible');
-
-      try {
-        const res  = await fetch('/api/scrape-leaderboard', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, months_active: months, us_only: usOnly, pages, start_page: startPage, fetch_profiles: profiles }),
-        });
-        const data = await res.json();
-        if (data.error) {
-          status.className = 'status visible error';
-          status.textContent = data.error;
-        } else {
-          lbData = data.results;
-          document.getElementById('lbChip').textContent = lbData.length;
-          status.className = 'status visible success';
-          status.innerHTML = `<span>✓ Found <b>${lbData.length}</b> players in ${data.elapsed}s</span>`;
-          renderLbTable();
-          document.getElementById('lbResultsCard').classList.add('visible');
-        }
-      } catch (err) {
-        status.className = 'status visible error';
-        status.textContent = 'Request failed: ' + err.message;
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Scrape`;
-      }
-    });
 
     function renderLbTable() {
       const hasEnrich = Object.keys(lbEnrichData).length > 0;
@@ -1575,8 +1459,7 @@ HTML = """
       status.className = 'status visible';
       status.innerHTML = `<span class="spinner"></span><span>Enriching via People Data Labs — ~${lbData.length * 0.2}s estimated...</span>`;
 
-      const lbUrl   = document.getElementById('lbUrl').value;
-      const profHint = lbUrl.includes('wsop.com') ? 'poker player' : '';
+      const profHint = 'poker player';
 
       try {
         const res  = await fetch('/api/enrich-contacts', {
@@ -1730,63 +1613,6 @@ def api_profile_details():
     elapsed = round(time.time() - start, 1)
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
     return jsonify(results=items, elapsed=elapsed, count=len(items))
-
-
-@app.route("/api/scrape-leaderboard", methods=["POST"])
-def api_scrape_leaderboard():
-    # openai_key may be None — WSOP URLs don't need it; scraper raises ValueError for non-WSOP without it
-    openai_key = os.getenv("OPENAI_API_KEY")
-
-    body = request.json or {}
-    url = body.get("url", "").strip()
-    if not url or not url.startswith("http"):
-        return jsonify(error="A valid URL is required"), 400
-
-    max_players   = min(int(body.get("max_players", 50)), 200)
-    months_active = int(body.get("months_active", 12))
-    us_only       = bool(body.get("us_only", True))
-
-    start = time.time()
-    try:
-        if "thehendonmob.com" in url:
-            # Paginated, Cloudflare-protected. This is the bounded interactive
-            # path — page count is capped here (use scraper.harvest for the full
-            # multi-day run). A page number in the URL itself takes precedence.
-            from scraper.hendon_mob import scrape_money_list
-            num_pages = max(1, min(int(body.get("pages", 1)), MAX_UI_PAGES))
-            start_page = int(body["start_page"]) if body.get("start_page") else None
-            fetch_profiles = bool(body.get("fetch_profiles", False))
-            players = scrape_money_list(
-                url=url, start_page=start_page, num_pages=num_pages,
-                fetch_profiles=fetch_profiles,
-                country="United States" if us_only else None,
-            )
-            results = [{
-                "rank": p.get("rank"),
-                "name": p.get("name", ""),
-                "country": p.get("country", ""),
-                "metric": p.get("earnings", ""),
-                "profile_url": p.get("profile_url"),
-                "city_state": p.get("city_state", ""),
-                "last_active_year": None,
-                "profiles": p.get("profiles", {}),
-            } for p in players]
-        else:
-            from scraper.hendon_mob import scrape_leaderboard
-            results = scrape_leaderboard(
-                url=url,
-                us_only=us_only,
-                months_active=months_active,
-                max_players=max_players,
-                openai_api_key=openai_key,
-            )
-    except ValueError as e:
-        return jsonify(error=str(e)), 400
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-
-    elapsed = round(time.time() - start, 1)
-    return jsonify(results=results, elapsed=elapsed, count=len(results))
 
 
 @app.route("/api/hendon-leaderboard", methods=["POST"])
