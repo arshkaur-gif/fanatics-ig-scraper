@@ -9,3 +9,4 @@ playwright>=1.40.0
 undetected-chromedriver>=3.5.5
 selenium>=4.15.0
 duckduckgo-search>=6.0.0
+pyairtable>=2.3.0

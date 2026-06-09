@@ -45,17 +45,40 @@ python3 app.py
 
 Then open **http://localhost:3002** in your browser.
 
-1. Go to the **Leaderboards** tab.
-2. Paste a Hendon Mob money-list URL
+The **Leaderboards** tab has two modes:
+
+**Hendon Mob database** (default) — query the curated dataset already loaded into
+Airtable (US players, ~$10k–$1M total earnings) without scraping. Filter by total
+earnings, earnings in the last year, last-active window, and state (or leave
+everything blank for the whole list), then export to CSV. Requires the Airtable
+env vars below.
+
+**Scrape a URL** — the original live scraper:
+
+1. Paste a Hendon Mob money-list URL
    (e.g. `https://pokerdb.thehendonmob.com/ranking/all-time-money-list/`).
-3. Set the number of pages (capped at 10 in the UI), optionally toggle "US only"
+2. Set the number of pages (capped at 10 in the UI), optionally toggle "US only"
    and "fetch full profiles," and run it.
-4. A Chrome window opens and solves the Cloudflare check (this takes a few seconds
+3. A Chrome window opens and solves the Cloudflare check (this takes a few seconds
    the first time). Results appear in a table.
-5. Use the **Download CSV / JSON** buttons to save the results.
+4. Use the CSV button to save the results.
 
 The UI does **not** write to the database — it just shows results and lets you
 download them. For a full dataset, use the batch harvester below.
+
+### Airtable (Hendon Mob database mode)
+
+The database mode reads from Airtable. Add these to a `.env` file in the repo root:
+
+```
+AIRTABLE_API_KEY=pat...        # personal access token, scope: data.records:read
+AIRTABLE_BASE_ID=app...        # the base holding the players table
+AIRTABLE_TABLE_NAME=hendonmob  # the table name (or id)
+```
+
+Filtering is pushed into Airtable's `filterByFormula`, so only matching rows are
+fetched. Column names are mapped in `scraper/airtable_store.py` (`FIELDS`) — edit
+that dict if your columns are named differently.
 
 > To stop the server, press `Ctrl+C` in the terminal.
 

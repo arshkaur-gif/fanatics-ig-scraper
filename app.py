@@ -358,6 +358,17 @@ HTML = """
     /* Leaderboard form */
     .lb-form-grid { display: grid; grid-template-columns: minmax(280px,2fr) 100px 160px auto; gap: 10px; position: relative; z-index: 1; }
     @media (max-width: 820px) { .lb-form-grid { grid-template-columns: 1fr; } }
+
+    /* Leaderboard source mode toggle */
+    .lb-mode { display: inline-flex; gap: 2px; padding: 3px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 20px; }
+    .mode-btn { background: none; border: none; color: var(--text-muted); font-family: inherit; font-size: 13px; font-weight: 500; padding: 7px 16px; border-radius: 7px; cursor: pointer; transition: background 150ms, color 150ms; }
+    .mode-btn:hover { color: var(--text); }
+    .mode-btn.active { background: var(--accent); color: white; }
+
+    /* Hendon Mob database filter form */
+    .hm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; align-items: end; position: relative; z-index: 1; }
+    .hm-range { display: flex; gap: 6px; }
+    .hm-range input { width: 100%; min-width: 0; }
     .lb-meta { margin-top: 10px; font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; position: relative; z-index: 1; }
     .lb-meta label { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-muted); }
     .lb-meta input[type="checkbox"] { accent-color: var(--accent); width: 13px; height: 13px; }
@@ -571,7 +582,12 @@ HTML = """
 
     <!-- Leaderboard tab -->
     <div id="lbTab" style="display:none;">
-      <section class="hero">
+      <div class="lb-mode">
+        <button type="button" class="mode-btn active" data-mode="hm" onclick="switchLbMode('hm')">Hendon Mob database</button>
+        <button type="button" class="mode-btn" data-mode="url" onclick="switchLbMode('url')">Scrape a URL</button>
+      </div>
+
+      <section class="hero" id="lbUrlMode" style="display:none;">
         <h1>Scrape a leaderboard</h1>
         <p>Pull player data from any public rankings page. Filter by country and activity, then export to CSV.</p>
         <form id="lbForm">
@@ -618,6 +634,19 @@ HTML = """
             </label>
             <span class="dim">·</span>
             <span class="dim">Profile visits add ~3s per player. A page number in the URL overrides “Start page”. For the full list use the harvest CLI.</span>
+          </div>
+        </form>
+      </section>
+
+      <section class="hero" id="hmPanel">
+        <h1>Hendon Mob database</h1>
+        <p>Query the curated US player dataset. Set any filters (or none for the whole list), then export to CSV.</p>
+        <form id="hmForm">
+          <div class="hm-grid" id="hmGrid"></div>
+          <div class="lb-meta">
+            <button type="submit" id="hmBtn" class="btn btn-primary">Fetch from Hendon Mob</button>
+            <label><input type="checkbox" id="hmHasSocial"> Only players with a social link</label>
+            <span class="dim">Leave filters at default/blank for the full list.</span>
           </div>
         </form>
       </section>
@@ -1309,6 +1338,105 @@ HTML = """
       document.getElementById('brandSub').textContent = subs[tab] || '';
     }
 
+    // ── Leaderboard source mode (Hendon Mob database vs URL scrape) ───────────
+    function switchLbMode(mode) {
+      document.getElementById('hmPanel').style.display    = mode === 'hm'  ? '' : 'none';
+      document.getElementById('lbUrlMode').style.display  = mode === 'url' ? '' : 'none';
+      document.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    }
+
+    // Build the Hendon Mob filter fields (kept in JS so the long state list
+    // stays out of the page markup).
+    const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
+    const HM_EARN_MIN = 10000, HM_EARN_MAX = 1000000;
+    (function buildHmForm() {
+      const stateOpts = '<option value="">All states</option>' + US_STATES.map(s => `<option value="${s}">${s}</option>`).join('');
+      document.getElementById('hmGrid').innerHTML = `
+        <div class="field">
+          <label>Total earnings ($10k–$1M)</label>
+          <div class="hm-range">
+            <input type="number" id="hmEarnMin" placeholder="min" value="${HM_EARN_MIN}" min="${HM_EARN_MIN}" max="${HM_EARN_MAX}" step="1000">
+            <input type="number" id="hmEarnMax" placeholder="max" value="${HM_EARN_MAX}" min="${HM_EARN_MIN}" max="${HM_EARN_MAX}" step="1000">
+          </div>
+        </div>
+        <div class="field">
+          <label>Earnings last year ($)</label>
+          <div class="hm-range">
+            <input type="number" id="hmRecentMin" placeholder="min" min="0">
+            <input type="number" id="hmRecentMax" placeholder="max" min="0">
+          </div>
+        </div>
+        <div class="field">
+          <label for="hmMonths">Active within</label>
+          <select id="hmMonths">
+            <option value="0">Any time</option>
+            <option value="12">1 year</option>
+            <option value="24">2 years</option>
+            <option value="36">3 years</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="hmStates">State</label>
+          <select id="hmStates">${stateOpts}</select>
+        </div>`;
+
+      // Total earnings is fixed to the dataset's 10k–1M range — clamp on edit.
+      const clamp = el => el.addEventListener('change', () => {
+        if (el.value === '') return;
+        el.value = Math.min(HM_EARN_MAX, Math.max(HM_EARN_MIN, Number(el.value)));
+      });
+      clamp(document.getElementById('hmEarnMin'));
+      clamp(document.getElementById('hmEarnMax'));
+    })();
+
+    document.getElementById('hmForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const num = id => { const v = document.getElementById(id).value.trim(); return v === '' ? null : Number(v); };
+      const stateVal = document.getElementById('hmStates').value;
+      const states = stateVal ? [stateVal] : [];
+      const payload = {
+        earnings_min: num('hmEarnMin'), earnings_max: num('hmEarnMax'),
+        recent_min: num('hmRecentMin'), recent_max: num('hmRecentMax'),
+        months_active: parseInt(document.getElementById('hmMonths').value) || 0,
+        states,
+        has_social: document.getElementById('hmHasSocial').checked,
+      };
+      const btn    = document.getElementById('hmBtn');
+      const status = document.getElementById('lbStatus');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Fetching';
+      status.className = 'status visible';
+      status.innerHTML = '<span class="spinner"></span><span>Querying the Hendon Mob dataset from Airtable…</span>';
+      document.getElementById('lbResultsCard').classList.remove('visible');
+
+      try {
+        const res  = await fetch('/api/hendon-leaderboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.className = 'status visible error';
+          status.textContent = data.error;
+        } else {
+          lbData = data.results;
+          lbEnrichData = {};
+          document.getElementById('lbChip').textContent = lbData.length;
+          status.className = 'status visible success';
+          status.innerHTML = `<span>✓ Found <b>${lbData.length}</b> players in ${data.elapsed}s</span>`;
+          renderLbTable();
+          document.getElementById('lbResultsCard').classList.add('visible');
+        }
+      } catch (err) {
+        status.className = 'status visible error';
+        status.textContent = 'Request failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Fetch from Hendon Mob';
+      }
+    });
+
     // ── Leaderboard scraper ──────────────────────────────────────────────────
     let lbData = [];
 
@@ -1368,14 +1496,13 @@ HTML = """
       const stat    = document.getElementById('lbFilterStat');
       stat.textContent = rows.length === lbData.length ? `${lbData.length} players` : `${rows.length} of ${lbData.length} players`;
 
-      const cols = ['Rank', 'Name', 'Metric', 'Country', 'State / City', 'Last Active', 'Links'];
+      const cols = ['Rank', 'Name', 'Metric', 'Last Year', 'Country', 'State / City', 'Last Active', 'Links'];
       if (hasEnrich) cols.push('Email', 'Phone', 'Socials', 'Match');
       document.getElementById('lbTableHead').innerHTML = cols.map(c => `<th>${c}</th>`).join('');
 
       const currentYear = new Date().getFullYear();
       document.getElementById('lbTableBody').innerHTML = rows.map(p => {
-        const q      = encodeURIComponent(`"${p.name}" poker player site:linkedin.com`);
-        const liLink = `<a class="search-link" href="https://www.google.com/search?q=${q}" target="_blank" rel="noopener">LinkedIn ↗</a>`;
+        // Profile link only when a social URL exists (e.g. twitter); no fallback search link.
         const profileLinks = Object.entries(p.profiles || {}).map(([net, url]) =>
           `<a class="search-link" href="${escapeHtml(url)}" target="_blank" rel="noopener">${net} ↗</a>`).join(' ');
         const yearCls = p.last_active_year && p.last_active_year < currentYear - 1 ? 'year-cell stale-year' : 'year-cell';
@@ -1401,10 +1528,11 @@ HTML = """
           <td class="num-cell">${p.rank ?? '—'}</td>
           <td style="font-weight:500;">${escapeHtml(p.name || '')}</td>
           <td class="earnings-cell">${escapeHtml(p.metric || '—')}</td>
+          <td class="earnings-cell" style="color:var(--text-muted);">${p.recent_earnings ? escapeHtml(p.recent_earnings) : '<span class="dim">—</span>'}</td>
           <td style="font-size:13px;color:var(--text-muted);">${escapeHtml(p.country || '—')}</td>
           <td style="font-size:13px;">${escapeHtml(p.city_state || '—')}</td>
           <td class="${yearCls}">${p.last_active_year ?? '—'}</td>
-          <td style="font-size:12px;">${profileLinks ? profileLinks + ' ' : ''}${liLink}</td>
+          <td style="font-size:12px;">${profileLinks || '<span class="dim">—</span>'}</td>
           ${enrichCells}
         </tr>`;
       }).join('');
@@ -1414,7 +1542,9 @@ HTML = """
       if (!lbData.length) return;
       const hasEnrich = Object.keys(lbEnrichData).length > 0;
       const hasSocials = lbData.some(r => r.profiles && Object.keys(r.profiles).length);
-      const baseHeaders = ['rank', 'name', 'metric', 'country', 'city_state', 'last_active_year'];
+      const hasResults = lbData.some(r => r.recent_earnings || r.last_cash_date);
+      const baseHeaders = ['rank', 'name', 'metric', 'country', 'city_state', 'last_active_year',
+        ...(hasResults ? ['recent_earnings', 'last_cash_date'] : [])];
       const headers = [...baseHeaders, ...(hasSocials ? ['socials'] : []), ...(hasEnrich ? ['email', 'phone', 'confidence'] : [])];
       const out = lbData.map(r => {
         const vals = baseHeaders.map(h => '"' + String(r[h] ?? '').replace(/"/g, '""') + '"');
@@ -1654,6 +1784,49 @@ def api_scrape_leaderboard():
         return jsonify(error=str(e)), 400
     except Exception as e:
         return jsonify(error=str(e)), 500
+
+    elapsed = round(time.time() - start, 1)
+    return jsonify(results=results, elapsed=elapsed, count=len(results))
+
+
+@app.route("/api/hendon-leaderboard", methods=["POST"])
+def api_hendon_leaderboard():
+    # Reads the curated Hendon Mob dataset from Airtable (the ~85k US, $10k–$1M
+    # players). No live scraping — filters are applied in the Airtable query.
+    body = request.json or {}
+
+    def _num(key):
+        v = body.get(key)
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    states = body.get("states") or []
+    if isinstance(states, str):
+        states = [states]
+    months_active = int(body.get("months_active") or 0)
+    limit = int(body["limit"]) if body.get("limit") else None
+
+    start = time.time()
+    try:
+        from scraper.airtable_store import query_players
+        results = query_players(
+            earnings_min=_num("earnings_min"),
+            earnings_max=_num("earnings_max"),
+            recent_min=_num("recent_min"),
+            recent_max=_num("recent_max"),
+            months_active=months_active,
+            states=states,
+            has_social=bool(body.get("has_social")),
+            limit=limit,
+        )
+    except RuntimeError as e:  # missing/invalid Airtable config
+        return jsonify(error=str(e)), 500
+    except Exception as e:
+        return jsonify(error=f"Airtable query failed: {e}"), 500
 
     elapsed = round(time.time() - start, 1)
     return jsonify(results=results, elapsed=elapsed, count=len(results))
