@@ -6,3 +6,6 @@ data/
 .context/
 venv/
 .vercel
+
+# Generated CSV exports (reproducible via `python3 -m scraper.harvest export`)
+*.csv

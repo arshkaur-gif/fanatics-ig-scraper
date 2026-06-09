@@ -515,13 +515,38 @@ def _is_cf_challenge(page_source: str) -> bool:
     return any(m in low for m in _CF_CHALLENGE_MARKERS)
 
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  #1 THING THAT BREAKS THIS SCRAPER: Chrome / undetected-chromedriver drift  ║
+# ╠═══════════════════════════════════════════════════════════════════════════╣
+# ║  Chrome auto-updates silently. When it jumps a major version, the pinned    ║
+# ║  ChromeDriver no longer matches and EVERY scrape fails here at startup —     ║
+# ║  uc.Chrome() raises and _new_undetected_driver() returns None, which        ║
+# ║  surfaces as "undetected-chromedriver is required" or blank/empty scrapes.  ║
+# ║                                                                             ║
+# ║  THE FIX (try this FIRST, before debugging anything else):                  ║
+# ║      pip install -U undetected-chromedriver                                 ║
+# ║  Then re-run. If it still fails, your installed Chrome may be newer than    ║
+# ║  any released driver — wait for a uc release, or downgrade Chrome.          ║
+# ║                                                                             ║
+# ║  This coupling is load-bearing and version-sensitive; treat it as the       ║
+# ║  prime suspect for any sudden total failure. See the module docstring for   ║
+# ║  why we need uc (headed) at all, and README "Troubleshooting".              ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 def _new_undetected_driver():
-    """Create a headed undetected-chromedriver instance, or None if uc is unavailable."""
+    """Create a headed undetected-chromedriver instance, or None if uc is unavailable.
+
+    Returning None on failure (rather than raising) is deliberate: callers treat
+    it as "browser couldn't start." The usual cause is the Chrome/driver version
+    drift described in the banner above — `pip install -U undetected-chromedriver`.
+    """
     try:
         import undetected_chromedriver as uc
     except Exception:
         return None
     try:
+        # version_main pins the driver to the installed Chrome's major version
+        # (see _chrome_major_version). This is exactly the coupling that breaks
+        # on a Chrome auto-update; None would let uc autodetect as a fallback.
         return uc.Chrome(options=uc.ChromeOptions(), headless=False,
                          version_main=_chrome_major_version())
     except Exception:

@@ -61,7 +61,7 @@ def _clean_name(raw: str) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None, twitter_bearer: str = None) -> dict | None:  # twitter_bearer kept for call-site compat
+def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None) -> dict | None:
     """
     Scrape a social profile URL and return contact fragments.
 

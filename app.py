@@ -1,4 +1,19 @@
-"""Web UI for the Instagram Followers Scraper."""
+"""
+Flask web UI for the scraping toolkit. Single-file app: the HTML/CSS/JS frontend
+is the `HTML` string below, served at `/`, and the JSON API routes are at the
+bottom of this file.
+
+Three tabs / API routes:
+  - Leaderboards (/api/scrape-leaderboard) — the Hendon Mob / WSOP rankings
+    scraper. The main tool; needs no API key for Hendon Mob. See scraper/.
+  - Instagram (/api/scrape, /api/profile-details) — Apify-backed follower and
+    profile scraping. Needs APIFY_API_TOKEN.
+  - Contact enrichment (/api/enrich-contacts) — find emails/socials for players.
+    Needs APIFY_API_TOKEN and/or OPENAI_API_KEY. See enrichment/.
+
+The UI does bounded, interactive pulls; for the full multi-day Hendon Mob
+harvest use the CLI instead (`python3 -m scraper.harvest`).
+"""
 
 import os
 import time
@@ -1646,9 +1661,8 @@ def api_scrape_leaderboard():
 
 @app.route("/api/enrich-contacts", methods=["POST"])
 def api_enrich_contacts():
-    openai_key   = os.getenv("OPENAI_API_KEY")
-    apify_key    = os.getenv("APIFY_API_TOKEN")
-    twitter_key  = os.getenv("TWITTER_BEARER_TOKEN")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    apify_key  = os.getenv("APIFY_API_TOKEN")
 
     if not openai_key and not apify_key:
         return jsonify(error="OPENAI_API_KEY (web-search) or APIFY_API_TOKEN (social scrape) is required"), 500
@@ -1670,7 +1684,6 @@ def api_enrich_contacts():
             profession_hint=profession_hint,
             openai_api_key=openai_key,
             apify_token=apify_key,
-            twitter_bearer=twitter_key,
         )
     except Exception as e:
         return jsonify(error=str(e)), 500

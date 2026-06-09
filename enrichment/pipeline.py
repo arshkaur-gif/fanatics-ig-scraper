@@ -18,7 +18,7 @@ from .web_search import enrich_web
 
 
 def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
-                  openai_api_key=None, apify_token=None, twitter_bearer=None):
+                  openai_api_key=None, apify_token=None):
     result = {
         "name": name,
         "emails": [],
@@ -32,7 +32,7 @@ def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
     if profile_urls and apify_token:
         from .social_scraper import scrape_profile
         for purl in profile_urls:
-            scraped = scrape_profile(purl, apify_token=apify_token, openai_api_key=openai_api_key, twitter_bearer=twitter_bearer)
+            scraped = scrape_profile(purl, apify_token=apify_token, openai_api_key=openai_api_key)
             if not scraped:
                 continue
             if scraped.get("name") and scraped["name"] != name:
@@ -60,7 +60,7 @@ def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
     return result
 
 
-def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=None, twitter_bearer=None):
+def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=None):
     """
     Enrich a list of player dicts.
     Each dict needs at minimum: {name}
@@ -83,7 +83,6 @@ def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=N
             profile_urls=profile_urls,
             openai_api_key=openai_api_key,
             apify_token=apify_token,
-            twitter_bearer=twitter_bearer,
         )
         if i < len(players) - 1:
             time.sleep(0.15)

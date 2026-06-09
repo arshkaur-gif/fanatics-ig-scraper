@@ -119,10 +119,19 @@ python3 -m scraper.harvest export --us-only --scraped-only -o us_players.csv
 
 ## What's in here
 
+> **On the `scraper/` package:** today it's *only* the Hendon Mob scraper, even
+> though it's named `scraper` (singular). The intent is to generalize to many
+> sources over time — each new source gets its own `<source>_*.py` modules and
+> the shared bits (cache, harvest loop, CLI) get factored out. For now, "the
+> scraper" means the Hendon Mob one. See `scraper/__init__.py` for the plan.
+
 | Path | What it is |
 |---|---|
-| `app.py` | Flask web UI (Leaderboards tab is the Hendon Mob scraper) |
-| `scraper/hendon_mob.py` | Core scraper — drives headed Chrome, parses the tables |
+| `app.py` | Flask web UI — Leaderboards (Hendon Mob/WSOP), Instagram, and contact-enrichment tabs. Single file: HTML/JS frontend + JSON API routes |
+| `scraper/hendon_mob.py` | Core scraper — drives headed Chrome past Cloudflare, parses the tables |
 | `scraper/harvest.py` | Batch harvester CLI (`run` / `status` / `export` / `backfill`) |
+| `scraper/hendon_harvest.py` | The resumable two-phase (roster → profiles) harvest engine the CLI drives |
 | `scraper/hendon_store.py` | SQLite cache layer (`data/hendon_mob.db`) |
+| `enrichment/` | Contact enrichment (email/socials) — Apify social scraping + web-search fallback. Needs API keys; optional |
+| `api/index.py` | Vercel serverless entry point — re-exports the Flask app |
 | `data/` | Local SQLite cache (gitignored) |
