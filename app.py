@@ -22,12 +22,18 @@ from apify_client import ApifyClient
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, request
 
+from enrichment.follower_fields import enrich_follower, extract_links, split_name
+
 load_dotenv()
 
 app = Flask(__name__)
 
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
+TWITTER_FOLLOWERS_ACTOR = "data-slayer/twitter-followers"
+# data-slayer paginates by maxPages (no result count); ~20 followers/page is a
+# defensive estimate used to map the UI's `limit` to maxPages. Tune after a live run.
+TWITTER_FOLLOWERS_PER_PAGE = 20
 
 # Approximate Apify pricing per result (used for client-side cost preview)
 COST_PER_FOLLOWER = 0.002
@@ -431,6 +437,13 @@ HTML = """
       <p>Pull followers or following from any public Instagram profile. Export to CSV or JSON.</p>
       <form id="scrapeForm" class="form-grid">
         <div class="field">
+          <label for="platform">Platform</label>
+          <select id="platform" name="platform" onchange="onPlatformChange()">
+            <option value="instagram">Instagram</option>
+            <option value="twitter">Twitter / X</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="usernames">Handle or URL</label>
           <input id="usernames" name="usernames" placeholder="dynastyrewards  (or paste IG URL)" required autocomplete="off">
         </div>
@@ -624,9 +637,11 @@ HTML = """
   <script>
     const COST_PER_FOLLOWER = """ + f"{COST_PER_FOLLOWER}" + """;
     const COST_PER_PROFILE = """ + f"{COST_PER_PROFILE}" + """;
+    const COST_PER_FOLLOWER_TW = 0.0015;  // data-slayer/twitter-followers, $1.50/1k
 
     let currentData = [];
     let hasDetails = false;
+    let curPlatform = 'instagram';
     let statusFilter = 'all';
     let sortCol = null;
     let sortDir = 'asc';
@@ -672,11 +687,28 @@ HTML = """
     // --- Cost preview (live) ---
     function updateCostTag() {
       const limit = parseInt(document.getElementById('limit').value) || 0;
-      const cost = limit * COST_PER_FOLLOWER;
+      const rate = document.getElementById('platform').value === 'twitter'
+        ? COST_PER_FOLLOWER_TW : COST_PER_FOLLOWER;
+      const cost = limit * rate;
       document.getElementById('costTag').textContent = '~$' + cost.toFixed(2);
     }
     document.getElementById('limit').addEventListener('input', updateCostTag);
     updateCostTag();
+
+    // Twitter returns bio/location/links in one pass, so the IG-only second
+    // pass ("Get profile details") and contact enrichment don't apply.
+    function onPlatformChange() {
+      const platform = document.getElementById('platform').value;
+      const isTw = platform === 'twitter';
+      document.getElementById('usernames').placeholder = isTw
+        ? 'elonmusk  (or paste X/Twitter URL)'
+        : 'dynastyrewards  (or paste IG URL)';
+      document.getElementById('detailsBtn').style.display = isTw ? 'none' : '';
+      document.getElementById('igEnrichBtn').style.display = isTw ? 'none' : '';
+      // data-slayer only scrapes followers, so hide the Direction selector for Twitter.
+      document.getElementById('type').closest('.field').style.display = isTw ? 'none' : '';
+      updateCostTag();
+    }
 
     // --- Scrape ---
     document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
@@ -684,7 +716,9 @@ HTML = """
       const usernames = document.getElementById('usernames').value.trim();
       const limit = parseInt(document.getElementById('limit').value) || 200;
       const type = document.getElementById('type').value;
+      const platform = document.getElementById('platform').value;
       if (!usernames) return;
+      curPlatform = platform;
 
       const btn = document.getElementById('submitBtn');
       const status = document.getElementById('status');
@@ -702,7 +736,7 @@ HTML = """
         const res = await fetch('/api/scrape', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ usernames, limit, type })
+          body: JSON.stringify({ usernames, limit, type, platform })
         });
         const data = await res.json();
         if (data.error) {
@@ -769,6 +803,10 @@ HTML = """
               row.follows_count = d.followsCount ?? d.follows_count ?? row.follows_count;
               row.posts_count = d.postsCount ?? d.posts_count ?? row.posts_count;
               row.external_url = d.externalUrl || d.external_url || row.external_url;
+              // Backend-computed enrichment fields (bio + website/bio links).
+              row.bio = d.bio || row.bio || '';
+              row.location = d.location || row.location || '';
+              row.links = (d.links && d.links.length) ? d.links : (row.links || []);
               matched++;
             }
           });
@@ -821,6 +859,9 @@ HTML = """
         switch (col) {
           case 'username': return (r.username || '').toLowerCase();
           case 'full_name': return (r.full_name || '').toLowerCase();
+          case 'first_name': return (r.first_name || '').toLowerCase();
+          case 'last_name': return (r.last_name || '').toLowerCase();
+          case 'location': return (r.location || '').toLowerCase();
           case 'is_verified': return r.is_verified ? 1 : 0;
           case 'is_private': return r.is_private ? 1 : 0;
           case 'followers_count': return r.followers_count ?? -1;
@@ -1145,7 +1186,8 @@ HTML = """
     function avatarFor(item) {
       if (item.profile_pic_url) {
         const initial = (item.username || '?')[0].toUpperCase();
-        return `<a href="https://instagram.com/${item.username}" target="_blank"><img class="avatar" src="${item.profile_pic_url}" alt="" loading="lazy" onerror="this.outerHTML='<div class=avatar-fallback>${initial}</div>';"></a>`;
+        const base = curPlatform === 'twitter' ? 'https://twitter.com/' : 'https://instagram.com/';
+        return `<a href="${base}${item.username}" target="_blank"><img class="avatar" src="${item.profile_pic_url}" alt="" loading="lazy" onerror="this.outerHTML='<div class=avatar-fallback>${initial}</div>';"></a>`;
       }
       const initial = (item.username || '?')[0].toUpperCase();
       return `<div class="avatar-fallback">${initial}</div>`;
@@ -1159,19 +1201,29 @@ HTML = """
     }
 
     function buildHeader() {
+      const showFields = hasDetails || curPlatform === 'twitter';
       const cols = [
         { key: 'check', label: '<input type="checkbox" class="row-check" onchange="toggleSelectAll(this)" id="headerCheck">', sort: false, w: '32px' },
         { key: 'avatar', label: '', sort: false, w: '44px' },
         { key: 'username', label: 'Username', sort: true },
         { key: 'full_name', label: 'Full name', sort: true },
+        { key: 'first_name', label: 'First name', sort: true },
+        { key: 'last_name', label: 'Last name', sort: true },
         { key: 'is_verified', label: 'Status', sort: true },
       ];
       if (hasDetails) {
         cols.push({ key: 'followers_count', label: 'Followers', sort: true, align: 'right' });
         cols.push({ key: 'posts_count', label: 'Posts', sort: true, align: 'right' });
-        cols.push({ key: 'biography', label: 'Bio', sort: false });
+      } else if (curPlatform === 'twitter') {
+        cols.push({ key: 'followers_count', label: 'Followers', sort: true, align: 'right' });
       } else {
         cols.push({ key: 'username_scrape', label: 'Source', sort: false });
+      }
+      if (showFields) {
+        cols.push({ key: 'biography', label: 'Bio', sort: false });
+        // Location only exists on Twitter — Instagram has no location field.
+        if (curPlatform === 'twitter') cols.push({ key: 'location', label: 'Location', sort: true });
+        cols.push({ key: 'links', label: 'Links', sort: false });
       }
       if (Object.keys(igEnrichData).length > 0) {
         cols.push({ key: 'email', label: 'Email', sort: false });
@@ -1196,21 +1248,44 @@ HTML = """
       if (filtered.length === currentData.length) stat.textContent = `${currentData.length} rows`;
       else stat.textContent = `${filtered.length} of ${currentData.length} rows`;
 
+      const showFields = hasDetails || curPlatform === 'twitter';
+      const profileBase = curPlatform === 'twitter' ? 'https://twitter.com/' : 'https://instagram.com/';
       const body = document.getElementById('resultsBody');
       body.innerHTML = filtered.map(item => {
         const checkCell = `<td><input type="checkbox" class="row-check" data-username="${item.username}" onclick="onRowCheck(event, this)"></td>`;
         const avatarCell = `<td>${avatarFor(item)}</td>`;
-        const usernameCell = `<td><a class="handle" href="https://instagram.com/${item.username}" target="_blank">@${item.username}</a></td>`;
+        const usernameCell = `<td><a class="handle" href="${profileBase}${item.username}" target="_blank">@${item.username}</a></td>`;
         const nameCell = `<td>${escapeHtml(item.full_name || '')}</td>`;
+        const firstCell = `<td>${escapeHtml(item.first_name || '') || '<span class="dim">—</span>'}</td>`;
+        const lastCell = `<td>${escapeHtml(item.last_name || '') || '<span class="dim">—</span>'}</td>`;
         const statusCell = `<td>${item.is_verified ? '<span class="badge verified">✓ Verified</span> ' : ''}${item.is_private ? '<span class="badge private">Private</span>' : '<span class="badge public">Public</span>'}</td>`;
 
         let extra = '';
         if (hasDetails) {
           extra += `<td class="num-cell">${fmtNum(item.followers_count)}</td>`;
           extra += `<td class="num-cell">${fmtNum(item.posts_count)}</td>`;
-          extra += `<td class="bio-cell">${escapeHtml(item.biography || '').slice(0, 240) || '<span class="dim">—</span>'}</td>`;
+        } else if (curPlatform === 'twitter') {
+          extra += `<td class="num-cell">${fmtNum(item.followers_count)}</td>`;
         } else {
           extra += `<td><a class="sub-handle" href="https://instagram.com/${item.username_scrape || ''}" target="_blank">@${item.username_scrape || '—'}</a></td>`;
+        }
+        if (showFields) {
+          const bioText = item.biography || item.bio || '';
+          extra += `<td class="bio-cell">${escapeHtml(bioText).slice(0, 240) || '<span class="dim">—</span>'}</td>`;
+          // Location only exists on Twitter — Instagram has no location field.
+          if (curPlatform === 'twitter') {
+            extra += `<td>${escapeHtml(item.location || '') || '<span class="dim">—</span>'}</td>`;
+          }
+          // Always surface external_url in Links, even if the computed array is empty.
+          const norm = u => (u || '').replace(/^https?:\\/\\//, '').replace(/\\/$/, '').toLowerCase();
+          const links = Array.isArray(item.links) ? item.links.slice() : [];
+          if (item.external_url && !links.some(l => norm(l) === norm(item.external_url))) {
+            links.unshift(item.external_url);
+          }
+          const linksHtml = links.length
+            ? links.map(u => { const h = /^https?:\\/\\//.test(u) ? u : 'https://' + u; return `<a href="${escapeHtml(h)}" target="_blank" rel="noopener">${escapeHtml(u.replace(/^https?:\\/\\//, ''))}</a>`; }).join('<br>')
+            : '<span class="dim">—</span>';
+          extra += `<td class="bio-cell">${linksHtml}</td>`;
         }
         if (Object.keys(igEnrichData).length > 0) {
           const key = item.full_name || item.username;
@@ -1223,7 +1298,7 @@ HTML = """
           extra += `<td class="phone-cell">${escapeHtml(phone) || '<span class="dim">—</span>'}</td>`;
           extra += `<td>${email ? `<span class="conf-badge ${confCls}">${conf}</span>` : '<span class="dim">—</span>'}</td>`;
         }
-        return `<tr>${checkCell}${avatarCell}${usernameCell}${nameCell}${statusCell}${extra}</tr>`;
+        return `<tr>${checkCell}${avatarCell}${usernameCell}${nameCell}${firstCell}${lastCell}${statusCell}${extra}</tr>`;
       }).join('');
       updateSelectCount();
     }
@@ -1236,8 +1311,13 @@ HTML = """
       if (!currentData.length) return;
       const hasEnrich = Object.keys(igEnrichData).length > 0;
       const rows = applySort(applyFilters(currentData));
-      const baseHeaders = ['username', 'full_name', 'id', 'is_private', 'is_verified', 'username_scrape'];
-      if (hasDetails) baseHeaders.push('biography', 'followers_count', 'follows_count', 'posts_count', 'external_url');
+      const showFields = hasDetails || curPlatform === 'twitter';
+      const baseHeaders = ['username', 'full_name', 'first_name', 'last_name', 'id', 'is_private', 'is_verified', 'username_scrape'];
+      if (hasDetails) baseHeaders.push('biography', 'followers_count', 'follows_count', 'posts_count');
+      else if (curPlatform === 'twitter') baseHeaders.push('biography', 'followers_count');
+      // Location only exists on Twitter — Instagram has no location field.
+      if (curPlatform === 'twitter') baseHeaders.push('location');
+      if (showFields) baseHeaders.push('links');
       const headers = [...baseHeaders, ...(hasEnrich ? ['email', 'phone', 'confidence'] : [])];
       const out = rows.map(r => {
         const baseVals = baseHeaders.map(h => {
@@ -1567,6 +1647,14 @@ def api_scrape():
         return jsonify(error="No usernames provided"), 400
 
     limit = max(100, min(body.get("limit", 200), 90000))
+    platform = body.get("platform", "instagram")
+    if platform not in ("instagram", "twitter"):
+        platform = "instagram"
+
+    if platform == "twitter":
+        # data-slayer only scrapes followers (no following mode).
+        return _scrape_twitter_followers(token, usernames, limit)
+
     data_type = body.get("type", "Followers")
     if data_type not in ("Followers", "Followings"):
         data_type = "Followers"
@@ -1586,7 +1674,59 @@ def api_scrape():
 
     elapsed = round(time.time() - start, 1)
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    # The IG followers list gives username + full_name only (no bio). Split the
+    # name now; bio/links are filled in by the /api/profile-details second pass.
+    for item in items:
+        first, last = split_name(item.get("full_name") or "", item.get("username") or "")
+        item["first_name"] = first
+        item["last_name"] = last
     return jsonify(results=items, elapsed=elapsed, count=len(items))
+
+
+def _scrape_twitter_followers(token, usernames, limit):
+    """
+    Twitter/X followers via data-slayer/twitter-followers (no login).
+
+    This actor takes a single `userId` and paginates via `maxPages` (1-100); it
+    has no result-count field and only does followers (no following mode). So we
+    call it once per username, derive maxPages from the requested limit, then
+    aggregate and trim. Output carries bio + location + website per follower, so
+    we enrich here and need no profile-details second pass.
+    """
+    max_pages = max(1, min(-(-limit // TWITTER_FOLLOWERS_PER_PAGE), 100))
+
+    client = ApifyClient(token)
+    start = time.time()
+    raw = []
+    try:
+        for handle in usernames:
+            run = client.actor(TWITTER_FOLLOWERS_ACTOR).call(
+                run_input={"userId": handle, "maxPages": max_pages}
+            )
+            if run:
+                raw.extend(client.dataset(run["defaultDatasetId"]).iterate_items())
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    elapsed = round(time.time() - start, 1)
+    raw = raw[:limit]
+
+    results = []
+    for d in raw:
+        record = {
+            "username": d.get("screen_name") or d.get("username") or "",
+            "full_name": d.get("name") or "",
+            "biography": d.get("description") or "",
+            "external_url": d.get("website") or "",
+            "location": d.get("location") or "",
+            "followers_count": d.get("followers_count") or 0,
+            "is_verified": d.get("blue_verified") or d.get("verified") or False,
+            # Twitter's "protected" account == Instagram's is_private.
+            "is_private": d.get("protected") or d.get("is_private") or d.get("private") or False,
+        }
+        results.append(enrich_follower(record))
+
+    return jsonify(results=results, elapsed=elapsed, count=len(results))
 
 
 @app.route("/api/profile-details", methods=["POST"])
@@ -1612,6 +1752,20 @@ def api_profile_details():
 
     elapsed = round(time.time() - start, 1)
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    # Second pass has the bio + external link — surface them as `bio` and `links`.
+    # `location` stays empty for IG (deferred LLM-from-bio phase).
+    for item in items:
+        bio = item.get("biography") or ""
+        # IG exposes the bio link as `externalUrl` (single) and/or `externalUrls`
+        # (array, for profiles with multiple links). Collect both.
+        externals = []
+        single = item.get("externalUrl") or item.get("external_url")
+        if single:
+            externals.append(single)
+        externals.extend(item.get("externalUrls") or [])
+        item["bio"] = bio
+        item["location"] = item.get("location") or ""
+        item["links"] = extract_links(bio, externals)
     return jsonify(results=items, elapsed=elapsed, count=len(items))
 
 
