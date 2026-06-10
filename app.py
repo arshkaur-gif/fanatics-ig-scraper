@@ -133,7 +133,7 @@ HTML = """
 
     .form-grid {
       display: grid;
-      grid-template-columns: minmax(240px,1fr) 120px 160px auto;
+      grid-template-columns: 150px minmax(240px,1fr) 110px 140px auto;
       gap: 10px;
       position: relative;
       z-index: 1;
@@ -145,7 +145,7 @@ HTML = """
       background: var(--bg-elev);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 8px 14px;
+      padding: 5px 14px;
       transition: border-color 150ms, background 150ms;
     }
     .field:focus-within { border-color: var(--accent); background: #0b0d12; box-shadow: 0 0 0 4px rgba(99,102,241,0.08); }
@@ -423,7 +423,7 @@ HTML = """
     <div class="tab-nav">
       <button class="tab-btn active" data-tab="ig" onclick="switchTab('ig')">
         <svg style="width:13px;height:13px;vertical-align:-2px;margin-right:6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1.2" fill="currentColor"/></svg>
-        Instagram
+        Socials
       </button>
       <button class="tab-btn" data-tab="lb" onclick="switchTab('lb')">
         <svg style="width:13px;height:13px;vertical-align:-2px;margin-right:6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
