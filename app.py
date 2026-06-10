@@ -585,7 +585,7 @@ HTML = """
     <div class="empty" id="emptyState">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <div class="empty-title">Enter a handle to get started</div>
-      <div class="empty-sub">Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.</div>
+      <div class="empty-sub" id="emptySub">Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.</div>
     </div>
     </div><!-- /igTab -->
 
@@ -707,6 +707,9 @@ HTML = """
       document.getElementById('igEnrichBtn').style.display = isTw ? 'none' : '';
       // data-slayer only scrapes followers, so hide the Direction selector for Twitter.
       document.getElementById('type').closest('.field').style.display = isTw ? 'none' : '';
+      document.getElementById('emptySub').innerHTML = isTw
+        ? 'Try <span style="color:var(--accent);">elonmusk</span>, <span style="color:var(--accent);">nasa</span>, or any public Twitter / X account.'
+        : 'Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.';
       updateCostTag();
     }
 
