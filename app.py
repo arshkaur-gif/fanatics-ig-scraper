@@ -33,6 +33,8 @@ PROFILE_ACTOR = "apify/instagram-profile-scraper"
 TWITTER_FOLLOWERS_ACTOR = "data-slayer/twitter-followers"
 # data-slayer paginates by maxPages (no result count); ~20 followers/page is a
 # defensive estimate used to map the UI's `limit` to maxPages. Tune after a live run.
+# NOTE: capped at ~2k followers/account. To switch to the full-list apidojo actor
+# (needs a paid Apify plan), see docs/twitter-apidojo-switch.md.
 TWITTER_FOLLOWERS_PER_PAGE = 20
 
 # Approximate Apify pricing per result (used for client-side cost preview)
@@ -638,7 +640,7 @@ HTML = """
   <script>
     const COST_PER_FOLLOWER = """ + f"{COST_PER_FOLLOWER}" + """;
     const COST_PER_PROFILE = """ + f"{COST_PER_PROFILE}" + """;
-    const COST_PER_FOLLOWER_TW = 0.0015;  // data-slayer/twitter-followers, $1.50/1k
+    const COST_PER_FOLLOWER_TW = 0.0015;  // data-slayer/twitter-followers, ~$1.50/1k
 
     let currentData = [];
     let hasDetails = false;
@@ -1689,13 +1691,16 @@ def api_scrape():
 
 def _scrape_twitter_followers(token, usernames, limit):
     """
-    Twitter/X followers via data-slayer/twitter-followers (no login).
+    Twitter/X followers via data-slayer/twitter-followers (no login, Free-Plan-friendly).
 
     This actor takes a single `userId` and paginates via `maxPages` (1-100); it
     has no result-count field and only does followers (no following mode). So we
     call it once per username, derive maxPages from the requested limit, then
     aggregate and trim. Output carries bio + location + website per follower, so
     we enrich here and need no profile-details second pass.
+
+    Capped at ~2k followers/account. For the full-list apidojo actor (needs a paid
+    Apify plan), see docs/twitter-apidojo-switch.md.
     """
     max_pages = max(1, min(-(-limit // TWITTER_FOLLOWERS_PER_PAGE), 100))
 
