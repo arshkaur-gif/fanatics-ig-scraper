@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, request
 
 from enrichment.follower_fields import enrich_follower, extract_links, split_name
+from enrichment.location_extract import extract_location
 
 load_dotenv()
 
@@ -1227,8 +1228,9 @@ HTML = """
       }
       if (showFields) {
         cols.push({ key: 'biography', label: 'Bio', sort: false });
-        // Location only exists on Twitter — Instagram has no location field.
-        if (curPlatform === 'twitter') cols.push({ key: 'location', label: 'Location', sort: true });
+        // Location: a real profile field on Twitter, derived from the bio on IG.
+        // Show the column whenever any row actually has one.
+        if (currentData.some(r => r.location)) cols.push({ key: 'location', label: 'Location', sort: true });
         cols.push({ key: 'links', label: 'Links', sort: false });
       }
       if (Object.keys(igEnrichData).length > 0) {
@@ -1255,6 +1257,7 @@ HTML = """
       else stat.textContent = `${filtered.length} of ${currentData.length} rows`;
 
       const showFields = hasDetails || curPlatform === 'twitter';
+      const showLocation = currentData.some(r => r.location);
       const profileBase = curPlatform === 'twitter' ? 'https://twitter.com/' : 'https://instagram.com/';
       const body = document.getElementById('resultsBody');
       body.innerHTML = filtered.map(item => {
@@ -1278,8 +1281,9 @@ HTML = """
         if (showFields) {
           const bioText = item.biography || item.bio || '';
           extra += `<td class="bio-cell">${escapeHtml(bioText).slice(0, 240) || '<span class="dim">—</span>'}</td>`;
-          // Location only exists on Twitter — Instagram has no location field.
-          if (curPlatform === 'twitter') {
+          // Location: real field on Twitter, bio-derived on IG. Column shows
+          // only when some row has one — keep the cell in sync with the header.
+          if (showLocation) {
             extra += `<td>${escapeHtml(item.location || '') || '<span class="dim">—</span>'}</td>`;
           }
           // Always surface external_url in Links, even if the computed array is empty.
@@ -1321,8 +1325,8 @@ HTML = """
       const baseHeaders = ['username', 'full_name', 'first_name', 'last_name', 'id', 'is_private', 'is_verified', 'username_scrape'];
       if (hasDetails) baseHeaders.push('biography', 'followers_count', 'follows_count', 'posts_count');
       else if (curPlatform === 'twitter') baseHeaders.push('biography', 'followers_count');
-      // Location only exists on Twitter — Instagram has no location field.
-      if (curPlatform === 'twitter') baseHeaders.push('location');
+      // Location: real field on Twitter, bio-derived on IG. Export when present.
+      if (showFields && currentData.some(r => r.location)) baseHeaders.push('location');
       if (showFields) baseHeaders.push('links');
       const headers = [...baseHeaders, ...(hasEnrich ? ['email', 'phone', 'confidence'] : [])];
       const out = rows.map(r => {
@@ -1720,6 +1724,7 @@ def _scrape_twitter_followers(token, usernames, limit):
     elapsed = round(time.time() - start, 1)
     raw = raw[:limit]
 
+    openai_key = os.getenv("OPENAI_API_KEY")
     results = []
     for d in raw:
         record = {
@@ -1733,7 +1738,11 @@ def _scrape_twitter_followers(token, usernames, limit):
             # Twitter's "protected" account == Instagram's is_private.
             "is_private": d.get("protected") or d.get("is_private") or d.get("private") or False,
         }
-        results.append(enrich_follower(record))
+        record = enrich_follower(record)
+        # Twitter's location field is often blank — fall back to the bio.
+        if not record["location"]:
+            record["location"] = extract_location(record["bio"], openai_key)
+        results.append(record)
 
     return jsonify(results=results, elapsed=elapsed, count=len(results))
 
@@ -1761,8 +1770,9 @@ def api_profile_details():
 
     elapsed = round(time.time() - start, 1)
     items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    openai_key = os.getenv("OPENAI_API_KEY")
     # Second pass has the bio + external link — surface them as `bio` and `links`.
-    # `location` stays empty for IG (deferred LLM-from-bio phase).
+    # IG has no location field, so derive it from the bio (regex + LLM fallback).
     for item in items:
         bio = item.get("biography") or ""
         # IG exposes the bio link as `externalUrl` (single) and/or `externalUrls`
@@ -1773,7 +1783,7 @@ def api_profile_details():
             externals.append(single)
         externals.extend(item.get("externalUrls") or [])
         item["bio"] = bio
-        item["location"] = item.get("location") or ""
+        item["location"] = item.get("location") or extract_location(bio, openai_key)
         item["links"] = extract_links(bio, externals)
     return jsonify(results=items, elapsed=elapsed, count=len(items))
 
