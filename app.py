@@ -1854,5 +1854,51 @@ def api_enrich_contacts():
     return jsonify(results=results, elapsed=elapsed, count=len(results))
 
 
+# ── Async generic-site crawl (Apify website-content-crawler) ──────────────────
+# Two-step, non-blocking so it fits Vercel's timeout: /api/crawl-start kicks off
+# the run and returns a run_id in ~1s; the client then polls /api/crawl-status
+# until status == "SUCCEEDED". The crawl runs on Apify's servers, so no request
+# blocks for the full ~2min crawl. Both gated behind ENABLE_CRAWLER_FALLBACK
+# (off by default — the blocking path can't run under Vercel Hobby's 10s cap).
+
+@app.route("/api/crawl-start", methods=["POST"])
+def api_crawl_start():
+    from enrichment.social_scraper import _crawler_fallback_enabled, start_website_crawl
+    if not _crawler_fallback_enabled():
+        return jsonify(error="Crawler fallback disabled (set ENABLE_CRAWLER_FALLBACK)"), 503
+    token = os.getenv("APIFY_API_TOKEN")
+    if not token:
+        return jsonify(error="APIFY_API_TOKEN not configured"), 500
+
+    body = request.json or {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        return jsonify(error="No url provided"), 400
+    if "://" not in url:
+        url = "https://" + url
+
+    run_id = start_website_crawl(url, token)
+    if not run_id:
+        return jsonify(error="Failed to start crawl"), 502
+    return jsonify(run_id=run_id, status="RUNNING")
+
+
+@app.route("/api/crawl-status", methods=["POST"])
+def api_crawl_status():
+    from enrichment.social_scraper import _crawler_fallback_enabled, fetch_crawl_result
+    if not _crawler_fallback_enabled():
+        return jsonify(error="Crawler fallback disabled (set ENABLE_CRAWLER_FALLBACK)"), 503
+    token = os.getenv("APIFY_API_TOKEN")
+    if not token:
+        return jsonify(error="APIFY_API_TOKEN not configured"), 500
+
+    body = request.json or {}
+    run_id = (body.get("run_id") or "").strip()
+    if not run_id:
+        return jsonify(error="No run_id provided"), 400
+
+    return jsonify(fetch_crawl_result(run_id, token, os.getenv("OPENAI_API_KEY")))
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3002, debug=True, use_reloader=False, threaded=True)

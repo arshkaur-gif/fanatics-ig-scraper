@@ -39,6 +39,9 @@ AIRTABLE_API_KEY=pat...    # personal access token, scope: data.records:read
 AIRTABLE_BASE_ID=app...    # the base holding the players table
 AIRTABLE_TABLE_NAME=hendonmob   # table name or id
 OPENAI_API_KEY=...         # optional — web-search enrichment fallback
+ENABLE_CRAWLER_FALLBACK=   # optional — "true" to enable the Apify website
+                           # content-crawler fallback for generic URLs.
+                           # OFF by default; Pro-only (crawl ~30s–2min > Hobby 10s cap).
 ```
 
 Airtable column names are mapped in `scraper/airtable_store.py` (`FIELDS`) — edit

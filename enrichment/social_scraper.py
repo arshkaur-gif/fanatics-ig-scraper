@@ -14,12 +14,15 @@ Twitter/X  → Apify apidojo/twitter-user-scraper
 TikTok     → Apify clockworks/tiktok-profile-scraper
 Reddit     → Reddit public JSON API (no Apify needed)
 Substack   → Direct HTTP scrape of /about
-Generic    → Direct HTTP + regex + optional LLM extraction
+Generic    → Direct HTTP + regex + optional LLM extraction, escalating to
+             the apify/website-content-crawler actor (JS render + residential
+             proxies + shallow crawl) when the cheap fetch finds nothing useful.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -80,10 +83,10 @@ def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None
     elif platform == "reddit":
         raw = _scrape_reddit(identifier)
     elif platform == "substack":
-        raw = _scrape_substack(identifier, openai_api_key)
+        raw = _scrape_substack(identifier, openai_api_key, apify_token)
     else:
         full_url = url if "://" in url else ("https://" + url)
-        raw = _scrape_generic(full_url, openai_api_key)
+        raw = _scrape_generic(full_url, openai_api_key, apify_token)
 
     if not raw:
         return None
@@ -92,7 +95,7 @@ def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None
     if not raw.get("emails"):
         external = raw.get("external_url") or ""
         if external and external.startswith("http"):
-            extra = _extract_from_bio_link(external, openai_api_key)
+            extra = _extract_from_bio_link(external, openai_api_key, apify_token)
             if extra:
                 raw.setdefault("emails", [])
                 raw.setdefault("phones", [])
@@ -347,11 +350,11 @@ def _scrape_reddit(username: str) -> dict | None:
         return None
 
 
-def _scrape_substack(username: str, openai_api_key: str = None) -> dict | None:
+def _scrape_substack(username: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
     if not username:
         return None
     about_url = f"https://{username}.substack.com/about"
-    result = _scrape_generic(about_url, openai_api_key)
+    result = _scrape_generic(about_url, openai_api_key, apify_token)
     if result:
         result.setdefault("profiles", {})
         result["profiles"]["substack"] = f"https://{username}.substack.com"
@@ -360,7 +363,8 @@ def _scrape_substack(username: str, openai_api_key: str = None) -> dict | None:
 
 # ── Generic HTTP scrape + extraction ─────────────────────────────────────────
 
-def _scrape_generic(url: str, openai_api_key: str = None) -> dict | None:
+def _scrape_generic(url: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
+    result = None
     try:
         req = urllib.request.Request(
             url,
@@ -368,16 +372,137 @@ def _scrape_generic(url: str, openai_api_key: str = None) -> dict | None:
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
+        result = _extract_contacts_from_html(html, openai_api_key)
+    except Exception:
+        result = None
+
+    # Tiered fallback: the cheap urllib fetch can't render JS, gets bot-blocked,
+    # and only sees one page. When it yields nothing useful, escalate to the
+    # Apify content crawler (pay-per-use, so gated to hard cases only).
+    #
+    # Gated behind ENABLE_CRAWLER_FALLBACK and OFF by default: the crawler runs
+    # ~30s–2min, which exceeds Vercel Hobby's 10s cap. Only enable on a Pro
+    # deploy with maxDuration raised (see vercel.json / README deploy note).
+    if (
+        apify_token
+        and _crawler_fallback_enabled()
+        and (not result or not (result.get("emails") or result.get("phones")))
+    ):
+        crawled = _scrape_website_crawler(url, apify_token, openai_api_key)
+        if crawled:
+            return crawled
+    return result
+
+
+def _crawler_fallback_enabled() -> bool:
+    """The Apify crawler fallback is opt-in (Pro deploy only) — see _scrape_generic."""
+    return os.environ.get("ENABLE_CRAWLER_FALLBACK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_CRAWLER_ACTOR = "apify/website-content-crawler"
+
+
+def _crawler_run_input(url: str) -> dict:
+    """Shared actor input for both the blocking and async crawl paths."""
+    return {
+        "startUrls": [{"url": url}],            # objects, not strings
+        "crawlerType": "playwright:adaptive",   # namespaced enum, NOT bare "adaptive"
+        "maxCrawlDepth": 1,                      # follow same-domain links one level
+        "maxCrawlPages": 5,                      # HARD cost cap per lookup
+        "saveMarkdown": True,
+    }
+
+
+def _crawl_items_to_result(items: list, openai_api_key: str = None, fallback_url: str = None) -> dict | None:
+    """
+    Turn website-content-crawler dataset items into the standard contact dict.
+
+    Dataset = one item per crawled page; concatenate before extraction. Shared by
+    the blocking scraper and the async poll endpoint so the shaping logic is in
+    one place (and unit-testable with fake items — no Apify credits needed).
+    """
+    if not items:
+        return None
+    combined = "\n\n".join(
+        (it.get("markdown") or it.get("text") or "") for it in items
+    ).strip()
+    if not combined:
+        return None
+    result = _extract_contacts_from_text(combined, openai_api_key)
+    if not result:
+        return None
+    title = (items[0].get("metadata") or {}).get("title")
+    if title:
+        result["name"] = title  # run through _clean_name at scrape_profile exit
+    result["external_url"] = items[0].get("url") or fallback_url
+    return result
+
+
+def _scrape_website_crawler(url: str, token: str, openai_api_key: str = None) -> dict | None:
+    """
+    BLOCKING fallback generic scraper backed by apify/website-content-crawler.
+
+    Runs on Apify's infra (headless browser + residential proxies), renders JS,
+    rotates past bot-protection, and shallow-crawls (depth=1) to reach
+    /contact and /about. Waits for the crawl (~30s–2min), so it only fits a
+    long-timeout (Pro) deploy. For serverless under a tight cap, use the
+    start_website_crawl / fetch_crawl_result pair below instead.
+    """
+    items = _run_apify_actor(_CRAWLER_ACTOR, _crawler_run_input(url), token, timeout=90)
+    return _crawl_items_to_result(items, openai_api_key, fallback_url=url)
+
+
+# ── Async crawl (start + poll) — serverless-safe alternative to the blocking path ─
+#
+# The crawl runs on Apify's servers, not here; .start() returns a run id in ~1s
+# without waiting, and each poll is a sub-second status check. So no single
+# request blocks for the ~2min crawl — it fits even Vercel Hobby's 10s cap.
+# Driven by /api/crawl-start and /api/crawl-status (see app.py).
+#
+# The `client` param is injectable purely so the state machine can be tested
+# with a fake client (no real Apify run, no credits); production passes None.
+
+def start_website_crawl(url: str, token: str, client=None) -> str | None:
+    """Kick off a crawl WITHOUT waiting. Returns an Apify run id to poll later."""
+    try:
+        if client is None:
+            from apify_client import ApifyClient
+            client = ApifyClient(token)
+        run = client.actor(_CRAWLER_ACTOR).start(run_input=_crawler_run_input(url))
+        return (run or {}).get("id")
     except Exception:
         return None
-    return _extract_contacts_from_html(html, openai_api_key)
 
 
-def _extract_from_bio_link(url: str, openai_api_key: str = None) -> dict | None:
+def fetch_crawl_result(run_id: str, token: str, openai_api_key: str = None, client=None) -> dict:
+    """
+    Poll a crawl run started by start_website_crawl.
+
+    Returns {"status": <apify run status>, "result": <contact dict | None>}.
+    `result` stays None until status == "SUCCEEDED". Reading run status and the
+    dataset costs no Apify credits — only the actor run itself does.
+    """
+    try:
+        if client is None:
+            from apify_client import ApifyClient
+            client = ApifyClient(token)
+        run = client.run(run_id).get()
+        if not run:
+            return {"status": "NOT_FOUND", "result": None}
+        status = run.get("status")
+        if status != "SUCCEEDED":
+            return {"status": status, "result": None}
+        items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        return {"status": status, "result": _crawl_items_to_result(items, openai_api_key)}
+    except Exception as e:
+        return {"status": "ERROR", "result": None, "error": str(e)}
+
+
+def _extract_from_bio_link(url: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     if any(d in host for d in _SKIP_BIO_DOMAINS):
         return None
-    return _scrape_generic(url, openai_api_key)
+    return _scrape_generic(url, openai_api_key, apify_token)
 
 
 def _extract_contacts_from_html(html: str, openai_api_key: str = None) -> dict | None:
@@ -385,7 +510,11 @@ def _extract_contacts_from_html(html: str, openai_api_key: str = None) -> dict |
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
+    return _extract_contacts_from_text(text, openai_api_key)
 
+
+def _extract_contacts_from_text(text: str, openai_api_key: str = None) -> dict | None:
+    """Pull emails/phones (then LLM as last resort) out of already-clean text."""
     emails = list(dict.fromkeys(
         re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
     ))
