@@ -21,9 +21,11 @@ Generic    → Direct HTTP + regex + optional LLM extraction, escalating to
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import urllib.parse
 import urllib.request
 
@@ -361,16 +363,73 @@ def _scrape_substack(username: str, openai_api_key: str = None, apify_token: str
     return result
 
 
+# ── SSRF guard for server-side fetches ───────────────────────────────────────
+#
+# `_scrape_generic` fetches caller-influenced URLs (player `instagram_url`,
+# bio/external links) directly from this server. Without a guard that is an SSRF
+# + local-file-read primitive: `file:///etc/passwd`, cloud-metadata
+# (169.254.169.254), or internal hosts would all be fetched and any emails/phones
+# in the response handed back to the caller. So every server-side fetch is gated
+# on `_url_is_fetchable`: http(s) scheme only, and the host must resolve solely to
+# public IPs. Redirects are re-validated (a public URL can 30x to an internal one).
+
+def _url_is_fetchable(url: str) -> bool:
+    """True only for http(s) URLs whose host resolves entirely to public IPs."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or None)
+    except Exception:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return False
+    return True
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect target so a public URL can't bounce to an
+    internal one (or to a non-http scheme)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _url_is_fetchable(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(url: str, timeout: int = 10):
+    """urlopen that rejects non-public / non-http(s) URLs and unsafe redirects."""
+    if not _url_is_fetchable(url):
+        raise ValueError("URL is not a fetchable public http(s) address")
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; contact-enrichment/1.0)"},
+    )
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(req, timeout=timeout)
+
+
 # ── Generic HTTP scrape + extraction ─────────────────────────────────────────
 
 def _scrape_generic(url: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
     result = None
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; contact-enrichment/1.0)"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _safe_urlopen(url, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
         result = _extract_contacts_from_html(html, openai_api_key)
     except Exception:
@@ -386,6 +445,7 @@ def _scrape_generic(url: str, openai_api_key: str = None, apify_token: str = Non
     if (
         apify_token
         and _crawler_fallback_enabled()
+        and _url_is_fetchable(url)
         and (not result or not (result.get("emails") or result.get("phones")))
     ):
         crawled = _scrape_website_crawler(url, apify_token, openai_api_key)

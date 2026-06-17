@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(venv/bin/python -c \"import pytest; print\\('pytest', pytest.__version__\\)\")",
+      "Bash(venv/bin/python -c \"import flask, apify_client, pyairtable; print\\('deps ok'\\)\")",
+      "Bash(python3 tests/test_follower_fields.py)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(python3 tests/test_crawl_async.py)"
     ]
   }
 }

@@ -1901,4 +1901,8 @@ def api_crawl_status():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3002, debug=True, use_reloader=False, threaded=True)
+    # debug is OFF by default — the Werkzeug debugger exposes an RCE console to
+    # anyone who can reach the port. Opt in for local dev with FLASK_DEBUG=1.
+    debug = os.getenv("FLASK_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+    host = os.getenv("HOST", "127.0.0.1")
+    app.run(host=host, port=3002, debug=debug, use_reloader=False, threaded=True)
