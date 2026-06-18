@@ -1,4 +1,4 @@
-# Reach — Instagram / Leaderboard outreach UI
+# Reach — Instagram / Twitter / Leaderboard outreach UI
 
 A Flask web app for poker-player outreach. Everything here is backed by **hosted
 APIs only** (Apify, Airtable, OpenAI) — there is no local browser automation, so
@@ -17,8 +17,11 @@ this branch is **deployable to Vercel**.
 
 The app has two tabs:
 
-- **Instagram** — pull followers/following and profile details for any public
-  handle (via Apify). Export to CSV/JSON, plus DM-launcher helpers.
+- **Instagram / Twitter** — pick a platform, then pull followers (and, for
+  Instagram, following) plus profile details for any public handle (via Apify).
+  Twitter/X returns bio, location, and website inline in one pass; Instagram
+  fills in profile details in a second pass. Export to CSV/JSON, plus
+  DM-launcher helpers.
 - **Leaderboards → Hendon Mob database** — query the curated US player dataset
   already loaded into **Airtable** (~$10k–$1M total earnings). Filter by total
   earnings, recent earnings, last-active window, and state, then export to CSV.
@@ -34,11 +37,14 @@ Set these in a local `.env` (see `.env.example`) for local runs, or in the
 **Vercel project settings** for the deploy:
 
 ```
-APIFY_API_TOKEN=...        # Instagram scraping + social enrichment
+APIFY_API_TOKEN=...        # Instagram + Twitter/X scraping + social enrichment
 AIRTABLE_API_KEY=pat...    # personal access token, scope: data.records:read
 AIRTABLE_BASE_ID=app...    # the base holding the players table
-AIRTABLE_TABLE_NAME=hendonmob   # table name or id
+AIRTABLE_TABLE_NAME=hendonmob   # table name or id (defaults to "Players")
 OPENAI_API_KEY=...         # optional — web-search enrichment fallback
+USE_APIDOJO_FOLLOWERS=     # optional — "true" to use the cheaper apidojo IG
+                           # follower actor (~$0.55/1k vs ~$2.00/1k). Same shallow
+                           # shape, so the IG profile-details second pass is unchanged.
 ENABLE_CRAWLER_FALLBACK=   # optional — "true" to enable the Apify website
                            # content-crawler fallback for generic URLs.
                            # OFF by default; Pro-only (crawl ~30s–2min > Hobby 10s cap).
@@ -72,7 +78,7 @@ Flask app, `vercel.json` routes all traffic to it). To deploy:
 2. Point the project at this branch (`main`) and deploy.
 
 **Timeout note.** Vercel functions cap at 10s (Hobby) / 60s default, 300s max
-(Pro). Instagram and Airtable calls are usually fine; large contact-enrichment
+(Pro). Instagram, Twitter, and Airtable calls are usually fine; large contact-enrichment
 batches run synchronously (~5s/person) and can exceed the limit — keep batches
 small, and raise `maxDuration` on Vercel Pro if needed.
 
@@ -82,7 +88,7 @@ small, and raise `maxDuration` on Vercel Pro if needed.
 
 | Path | What it is |
 |---|---|
-| `app.py` | Flask web UI — Instagram + Leaderboards (Airtable) + enrichment. Single file: HTML/JS frontend + JSON API routes |
+| `app.py` | Flask web UI — Instagram/Twitter + Leaderboards (Airtable) + enrichment. Single file: HTML/JS frontend + JSON API routes |
 | `scraper/airtable_store.py` | Reads the curated Hendon Mob dataset from Airtable (the UI's "Hendon Mob database" mode) |
 | `enrichment/` | Contact enrichment (email/socials) — Apify social scraping + web-search fallback |
 | `api/index.py` | Vercel serverless entry point — re-exports the Flask app |
