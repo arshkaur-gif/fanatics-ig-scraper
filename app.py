@@ -31,6 +31,17 @@ app = Flask(__name__)
 
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
+# Cheaper IG follower-discovery actor, opt-in via USE_APIDOJO_FOLLOWERS. Returns
+# the SAME shallow shape as FOLLOWERS_ACTOR (username/fullName/isPrivate only —
+# no bio/links), so the /api/profile-details enrichment second pass is unchanged.
+# Cost: $0.0005/follower item + $0.01/seed handle ≈ $0.55/1k (vs ~$2.00/1k on
+# FOLLOWERS_ACTOR). `maxItems` caps profile + followers COMBINED, so we pass
+# limit + one slot per seed handle. Benched in scripts/prototype_apidojo_ig_followers.py.
+APIDOJO_FOLLOWERS_ACTOR = "apidojo/instagram-user-scraper"
+
+
+def _use_apidojo_followers() -> bool:
+    return os.environ.get("USE_APIDOJO_FOLLOWERS", "").strip().lower() in ("1", "true", "yes", "on")
 # Twitter/X followers via kaitoeasyapi/premium-x-follower-scraper-following-data
 # (imported as _X_FOLLOWER_ACTOR). One call per handle returns up to `maxFollowers`
 # followers WITH profile data inline (name, bio, website, location) — no login, no
@@ -40,7 +51,10 @@ TWITTER_FOLLOWERS_ACTOR = _X_FOLLOWER_ACTOR
 
 # Approximate Apify pricing per result (used for client-side cost preview)
 COST_PER_FOLLOWER = 0.002
+COST_PER_FOLLOWER_APIDOJO = 0.0005   # apidojo/instagram-user-scraper follower item ($0.50/1k) + ~$0.01/seed handle
 COST_PER_PROFILE = 0.0023
+# Per-result IG discovery rate the UI previews — tracks whichever actor is live.
+COST_PER_FOLLOWER_IG = COST_PER_FOLLOWER_APIDOJO if _use_apidojo_followers() else COST_PER_FOLLOWER
 
 
 HTML = """
@@ -471,7 +485,7 @@ HTML = """
         <span>Estimated cost</span>
         <span class="cost-tag" id="costTag">~$0.40</span>
         <span class="dim">·</span>
-        <span class="dim" id="costNote">≈ $""" + f"{COST_PER_FOLLOWER:.4f}" + """ per result · Apify actor min limit 100</span>
+        <span class="dim" id="costNote">≈ $""" + f"{COST_PER_FOLLOWER_IG:.4f}" + """ per result · Apify actor min limit 100</span>
       </div>
     </section>
 
@@ -639,7 +653,7 @@ HTML = """
   </main>
 
   <script>
-    const COST_PER_FOLLOWER = """ + f"{COST_PER_FOLLOWER}" + """;
+    const COST_PER_FOLLOWER = """ + f"{COST_PER_FOLLOWER_IG}" + """;  // tracks live IG discovery actor (apidojo vs default)
     const COST_PER_PROFILE = """ + f"{COST_PER_PROFILE}" + """;
     const COST_PER_FOLLOWER_TW = 0.00015;  // kaitoeasyapi/premium-x-follower-scraper, ~$0.15/1k
     const TWITTER_MIN_LIMIT = """ + f"{_X_FOLLOWER_MIN}" + """;  // actor floors result count at 200
@@ -1673,6 +1687,10 @@ def api_scrape():
         data_type = "Followers"
 
     client = ApifyClient(token)
+
+    if _use_apidojo_followers():
+        return _scrape_instagram_followers_apidojo(client, usernames, limit, data_type)
+
     run_input = {
         "Account": usernames,
         "resultsLimit": limit,
@@ -1694,6 +1712,55 @@ def api_scrape():
         item["first_name"] = first
         item["last_name"] = last
     return jsonify(results=items, elapsed=elapsed, count=len(items))
+
+
+def _scrape_instagram_followers_apidojo(client, usernames, limit, data_type):
+    """
+    IG follower/following discovery via apidojo/instagram-user-scraper (opt-in).
+
+    Returns the same shallow records as the default FOLLOWERS_ACTOR path
+    (username/full_name/first_name/last_name/is_private), so the UI and the
+    /api/profile-details enrichment second pass are unchanged. apidojo emits each
+    follower as a `user`-typed item carrying a `related` back-reference to its
+    seed profile; the seed profiles themselves come back without `related`, so we
+    drop them. `maxItems` caps profile + followers COMBINED, hence + len(seeds).
+    """
+    run_input = {
+        "handles": usernames,
+        "getFollowers": data_type == "Followers",
+        "getFollowings": data_type == "Followings",
+        "maxItems": limit + len(usernames),
+    }
+
+    start = time.time()
+    try:
+        run = client.actor(APIDOJO_FOLLOWERS_ACTOR).call(run_input=run_input)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    elapsed = round(time.time() - start, 1)
+    raw = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+
+    results = []
+    for d in raw:
+        # Keep only follower/following records (they carry the `related`
+        # back-reference); the seed profiles have none.
+        if not d.get("related"):
+            continue
+        username = d.get("username") or ""
+        full_name = d.get("fullName") or d.get("full_name") or ""
+        first, last = split_name(full_name, username)
+        results.append({
+            "username": username,
+            "full_name": full_name,
+            "first_name": first,
+            "last_name": last,
+            "is_private": d.get("isPrivate") or False,
+            "is_verified": d.get("isVerified") or False,
+        })
+        if len(results) >= limit:
+            break
+    return jsonify(results=results, elapsed=elapsed, count=len(results))
 
 
 def _scrape_twitter_followers(token, usernames, limit):
