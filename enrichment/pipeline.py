@@ -60,6 +60,63 @@ def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
     return result
 
 
+def enrich_followers(brand_handle, limit=200, openai_api_key=None, apify_token=None,
+                     follow_bio_links=True):
+    """
+    Enrich the followers of a brand/team X account.
+
+    One actor call fans `brand_handle` out into up to `limit` follower contacts
+    (name, bio, email-in-bio, website) via scrape_followers. Each follower still
+    missing an email then gets the same one-level bio-link follow that
+    enrich_person uses. Web-search fallback is intentionally NOT run per
+    follower — at 200+ records its ~5s/lookup would dominate runtime.
+
+    Returns a dict keyed by follower handle → the standard enrichment record.
+    """
+    if not (brand_handle and apify_token):
+        return {}
+
+    from .social_scraper import scrape_followers, _extract_from_bio_link, _X_COST_PER_USER
+
+    followers = scrape_followers(brand_handle, apify_token, limit=limit)
+    # No silent truncation: a full `limit` batch means more followers went
+    # unfetched. Surface that plus the (rough) cost of what we did pull.
+    n = len(followers)
+    print(f"[enrich_followers] @{brand_handle}: {n} followers "
+          f"(~${n * _X_COST_PER_USER:.2f})"
+          + (f"; capped at limit={limit}, more not fetched" if n >= limit else ""))
+
+    results = {}
+    for f in followers:
+        result = {
+            "name": f.get("name"),
+            "emails": list(f.get("emails") or []),
+            "phones": list(f.get("phones") or []),
+            "profiles": dict(f.get("profiles") or {}),
+            "confidence": "medium" if f.get("emails") else "none",
+            "source": [f.get("source", "social_scrape:x_followers")],
+        }
+        external = f.get("external_url") or ""
+        if external:
+            result["profiles"]["website"] = external
+
+        if (not result["emails"] and follow_bio_links
+                and external.startswith("http")):
+            extra = _extract_from_bio_link(external, openai_api_key, apify_token)
+            if extra:
+                result["emails"] += [e for e in (extra.get("emails") or [])
+                                     if e not in result["emails"]]
+                result["phones"] += [p for p in (extra.get("phones") or [])
+                                     if p not in result["phones"]]
+                if result["emails"]:
+                    result["confidence"] = "medium"
+                    result["source"].append("bio_link")
+
+        results[f.get("handle") or f.get("name")] = result
+
+    return results
+
+
 def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=None):
     """
     Enrich a list of player dicts.

@@ -1,136 +1,66 @@
-# Switching the Twitter scraper back to `apidojo/twitter-user-scraper`
+# Twitter/X follower scraping — actor notes
 
-## Why this is parked
-`apidojo/twitter-user-scraper` is the best Twitter followers actor we found:
+## Current backend: `kaitoeasyapi/premium-x-follower-scraper-following-data`
 
-| | data-slayer (current/interim) | **apidojo/twitter-user-scraper** |
+The `/api/scrape` Twitter path ([`_scrape_twitter_followers`](../app.py)) uses
+`kaitoeasyapi/premium-x-follower-scraper-following-data`. One call per handle
+returns the follower list **with profile data inline** (name, bio, website,
+location) — no login, no `maxPages` pagination, no ~2k/account cap.
+
+| | kaitoeasyapi (current) | apidojo (alternative, see below) |
 |---|---|---|
-| Full follower lists | ✗ (~2k cap via `maxPages` ≤ 100, no resume) | **✓ (`maxItems`, no page cap)** |
-| Website / external URL | ✓ (`website`) | ✓ (`entities.url.urls[].expanded_url`) |
+| Full follower lists | ✓ (`maxFollowers`) | ✓ (`maxItems`) |
+| Website / external URL | ✓ `entities.url.urls[].expanded_url` | ✓ same nesting |
 | Name + bio + location | ✓ | ✓ |
-| Following (not just followers) | ✗ (followers only) | ✓ (`getFollowing`) |
+| Following (not just followers) | ✓ via `getFollowing` (we run followers only) | ✓ via `getFollowing` |
 | Login required | No | No |
-| Price | ~$1.50/1k | ~$0.40/1k |
+| Paid Apify plan required | No | **Yes** (Free Plan returns ~0 items) |
+| Price | ~$0.15/1k | ~$0.40/1k |
 
-**Blocker:** apidojo gates **API usage behind a paid Apify plan**. On the Free Plan a
-run returns ~0 items with:
-> Users with the Free Plan can retrieve a maximum of 10 items.
-> You cannot use the API with the Free Plan.
+### Actor schema (verified from a live probe, 2026-06)
+**Input:**
+- `user_names`: array of handles (no `@`)
+- `getFollowers` / `getFollowing`: bool
+- `maxFollowers`: int result cap — **floor 200** (`_X_FOLLOWER_MIN`)
+- `maxFollowings`: int — must be **≥200 even when `getFollowing` is off** (validation)
 
-Once the Apify account is on a paid plan (cheapest tier ~$39/mo incl. credits), apply the
-changes below and Twitter gets full lists + website at lower per-result cost.
+**Output** (per follower — confirmed fields):
+- `screen_name` — handle · `name` — display name · `description` — bio
+- `location` · `followers_count` · `verified` (bool) · `protected` (== IG private)
+- `email` — present but rarely populated
+- website → top-level `url` is a **t.co shortlink**; the real site is
+  `entities.url.urls[].expanded_url` — resolved by
+  [`_x_profile_website`](../enrichment/social_scraper.py).
 
-## Actor schema (verified from Apify, 2026-06)
-**Input** (`apidojo/twitter-user-scraper`):
-- `twitterHandles`: array of handles (also accepts `startUrls`, `twitterUserIds`, `searchTerms`)
-- `getFollowers`: bool (default true) — scrape the followers list
-- `getFollowing`: bool (default true) — scrape the following list
-- `getRetweeters`: bool — set false (we don't want retweeters)
-- `maxItems`: int — total result cap; **omit/large = full list**
+Shared constants/helpers live in `enrichment/social_scraper.py`:
+`_X_FOLLOWER_ACTOR`, `_X_FOLLOWER_MIN`, `_X_COST_PER_USER`, `_x_profile_website`.
+The programmatic enrichment path (`scrape_followers` / `enrich_followers`) uses
+the same actor; the UI does not route through it.
 
-**Output** (per user; field names mapped defensively, confirm one raw item on first run):
-- `userName` — handle
-- `name` — display name
-- `description` (or `rawDescription`) — bio
-- `location`
-- website → nested at `entities.url.urls[].expanded_url` (pick `expanded_url`, not the `t.co` shortlink)
-- `followers` / `followersCount`
-- `isVerified` / `isBlueVerified`
-- `isPrivate`
+---
 
-## Code changes to re-apply (all in `app.py` unless noted)
+## Alternative: `apidojo/twitter-user-scraper` (if you need the Following direction)
 
-### 1. Actor constant (near the other `_ACTOR` constants)
-Replace the data-slayer constant + `TWITTER_FOLLOWERS_PER_PAGE` with:
-```python
-TWITTER_FOLLOWERS_ACTOR = "apidojo/twitter-user-scraper"
-```
+apidojo also returns full follower/following lists with the same website
+nesting, at a higher per-result price, and **requires a paid Apify plan** (the
+Free Plan caps API runs at ~10 items). Switch only if you need to scrape an
+account's *following* list as well as its followers (kaitoeasyapi is wired for
+followers only here).
 
-### 2. The scrape helper — replace `_scrape_twitter_followers` (and add `_twitter_website`)
-```python
-def _twitter_website(d: dict) -> str:
-    """apidojo returns the profile website nested at entities.url.urls[].expanded_url."""
-    ent = (d.get("entities") or {}).get("url") or {}
-    for u in (ent.get("urls") or []):
-        ex = (u or {}).get("expanded_url") or (u or {}).get("url")
-        if ex:
-            return ex
-    return d.get("url") or d.get("website") or ""
+**Input:** `twitterHandles` (array), `getFollowers`/`getFollowing` (bool),
+`getRetweeters: false`, `maxItems` (total cap, omit for full list).
+**Output:** `userName`, `name`, `description`/`rawDescription`, `location`,
+`entities.url.urls[].expanded_url`, `followers`/`followersCount`,
+`isVerified`/`isBlueVerified`, `isPrivate`.
 
+To switch: point `TWITTER_FOLLOWERS_ACTOR` at `apidojo/twitter-user-scraper`,
+send `{twitterHandles, getFollowers, getFollowing, getRetweeters:False, maxItems:limit}`,
+map the field names above, re-show the Direction selector in `onPlatformChange()`,
+and set `COST_PER_FOLLOWER_TW = 0.0004`.
 
-def _scrape_twitter_followers(token, usernames, limit, direction="Followers"):
-    """
-    Twitter/X followers (or following) via apidojo/twitter-user-scraper (no login).
-
-    Takes `twitterHandles` (array) + `maxItems` and returns the FULL list up to
-    maxItems (no page cap). Output carries name, bio, location, and the website
-    (nested under entities.url), so we enrich here — no profile-details pass.
-    """
-    want_following = direction == "Followings"
-    run_input = {
-        "twitterHandles": usernames,
-        "getFollowers": not want_following,
-        "getFollowing": want_following,
-        "getRetweeters": False,
-        "maxItems": limit,
-    }
-
-    client = ApifyClient(token)
-    start = time.time()
-    try:
-        run = client.actor(TWITTER_FOLLOWERS_ACTOR).call(run_input=run_input)
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-
-    elapsed = round(time.time() - start, 1)
-    raw = list(client.dataset(run["defaultDatasetId"]).iterate_items())[:limit]
-
-    results = []
-    for d in raw:
-        record = {
-            "username": d.get("userName") or d.get("screen_name") or d.get("username") or "",
-            "full_name": d.get("name") or "",
-            "biography": d.get("description") or d.get("rawDescription") or "",
-            "external_url": _twitter_website(d),
-            "location": d.get("location") or "",
-            "followers_count": d.get("followers") or d.get("followersCount") or 0,
-            "is_verified": d.get("isVerified") or d.get("isBlueVerified") or d.get("verified") or False,
-            # Twitter's "protected" account == Instagram's is_private.
-            "is_private": d.get("isPrivate") or d.get("protected") or False,
-        }
-        results.append(enrich_follower(record))
-
-    return jsonify(results=results, elapsed=elapsed, count=len(results))
-```
-
-### 3. Call site in `api_scrape` — pass the direction (apidojo supports following)
-```python
-    data_type = body.get("type", "Followers")
-    if data_type not in ("Followers", "Followings"):
-        data_type = "Followers"
-
-    if platform == "twitter":
-        return _scrape_twitter_followers(token, usernames, limit, data_type)
-
-    client = ApifyClient(token)
-```
-
-### 4. Front-end (`HTML` string)
-- In `onPlatformChange()`, **remove** the line that hides the Direction selector for Twitter
-  (apidojo supports both followers and following):
-  ```js
-  // delete this line:
-  document.getElementById('type').closest('.field').style.display = isTw ? 'none' : '';
-  ```
-- Update the Twitter cost rate:
-  ```js
-  const COST_PER_FOLLOWER_TW = 0.0004;  // apidojo/twitter-user-scraper, ~$0.40/1k
-  ```
-
-## Verify after switching
+## Verify after any actor switch
 1. `python3 -c "import ast; ast.parse(open('app.py').read())"` — syntax OK.
-2. Scrape a small handle on the Twitter platform; confirm followers come back with
-   first/last name, bio, location, and Links (website should be the real site, not a `t.co` link).
-3. Inspect one raw dataset item in the Apify run to confirm field names match the mapping
-   (`userName`, `description`, `entities.url...`); adjust aliases if the actor's shape changed.
-4. Confirm the Followers/Following dropdown works for Twitter.
+2. Scrape a small handle on the Twitter platform; confirm followers come back
+   with first/last name, bio, location, and a real website (not a `t.co` link).
+3. Inspect one raw dataset item from the Apify run to confirm field names match
+   the mapping; adjust aliases if the actor's shape changed.

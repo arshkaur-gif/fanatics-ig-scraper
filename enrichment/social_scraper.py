@@ -284,6 +284,114 @@ def _scrape_twitter_search(handle: str) -> dict | None:
         return None
 
 
+# ── Brand-follower discovery (X / Twitter) ────────────────────────────────────
+#
+# Goal: given a brand/team X account, pull its followers and enrich each.
+# kaitoeasyapi/premium-x-follower-scraper-following-data returns the follower
+# LIST with full profile data inline, so one actor call is discovery +
+# enrichment in a single request (~$0.15 / 1,000 users). This is a different
+# shape from the per-handle lookup above — it fans one brand handle out into N
+# follower contacts.
+
+_X_FOLLOWER_ACTOR = "kaitoeasyapi/premium-x-follower-scraper-following-data"
+_X_FOLLOWER_MIN = 200          # actor floor for both maxFollowers and maxFollowings
+_X_COST_PER_USER = 0.00015     # $0.15 / 1,000 users — for the cost estimate
+
+_EMAIL_RE = r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
+
+
+def _x_profile_website(d: dict) -> str:
+    """
+    Pull the real (un-shortened) website from a kaitoeasyapi user record.
+
+    The top-level `url` is a t.co short link (or null); the expanded URL lives
+    in entities.url.urls[].expanded_url (profile website) — fall back to links
+    in the bio (entities.description.urls) and finally the raw `url`.
+    """
+    ent = d.get("entities") or {}
+    for key in ("url", "description"):
+        for u in (ent.get(key) or {}).get("urls") or []:
+            exp = u.get("expanded_url")
+            if exp:
+                return exp
+    raw = d.get("url") or ""
+    if raw and not raw.startswith("http"):
+        raw = "https://" + raw
+    return raw
+
+
+def _x_follower_to_contact(d: dict) -> dict | None:
+    """Map one kaitoeasyapi follower record → the standard contact dict.
+
+    Pure (no network) so it's unit-testable with canned items. Returns None for
+    a record with no usable handle.
+    """
+    handle = d.get("screen_name") or ""
+    if not handle:
+        return None
+    bio = d.get("description") or ""
+    # Inline `email` is rare but real when present; also scan the bio.
+    emails = []
+    if d.get("email"):
+        emails.append(d["email"])
+    emails += re.findall(_EMAIL_RE, bio)
+    return {
+        "handle": handle,
+        "name": _clean_name(d.get("name") or handle),
+        "bio": bio,
+        "emails": list(dict.fromkeys(emails)),
+        "phones": [],
+        "external_url": _x_profile_website(d),
+        "location": d.get("location") or "",
+        "profiles": {"twitter": f"https://twitter.com/{handle}"},
+        "source": "social_scrape:x_followers",
+    }
+
+
+def _x_followers_items_to_contacts(items: list, limit: int = None) -> list:
+    """Map + dedupe a follower dataset into contact dicts (pure, testable)."""
+    contacts, seen = [], set()
+    for d in items or []:
+        c = _x_follower_to_contact(d)
+        if not c:
+            continue
+        key = c["handle"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        contacts.append(c)
+        if limit and len(contacts) >= limit:
+            break
+    return contacts
+
+
+def scrape_followers(brand_handle: str, apify_token: str, *, limit: int = 200) -> list:
+    """
+    Pull a brand/team X account's followers, each as a standard contact dict.
+
+    One actor call returns up to `limit` followers WITH profile data inline
+    (name, bio, website, email-in-bio), so this is discovery + enrichment in a
+    single request. `limit` is floored at the actor minimum (200). Records are
+    deduped by handle. Returns [] on any failure (token missing, actor error).
+    """
+    if not brand_handle or not apify_token:
+        return []
+    limit = max(_X_FOLLOWER_MIN, int(limit))
+    items = _run_apify_actor(
+        _X_FOLLOWER_ACTOR,
+        {
+            "user_names": [brand_handle],
+            "getFollowers": True,
+            "getFollowing": False,
+            "maxFollowers": limit,
+            "maxFollowings": _X_FOLLOWER_MIN,  # actor validates >=200 even when off
+        },
+        apify_token,
+        timeout=300,
+    )
+    return _x_followers_items_to_contacts(items, limit=limit)
+
+
 def _extract_website_from_text(text: str, skip: frozenset = None) -> str:
     """Pull the first non-social, non-tracking URL out of a text blob."""
     if skip is None:

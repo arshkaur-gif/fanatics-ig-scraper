@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, request
 
 from enrichment.follower_fields import enrich_follower, extract_links, split_name
+from enrichment.social_scraper import _X_FOLLOWER_ACTOR, _X_FOLLOWER_MIN, _x_profile_website
 
 load_dotenv()
 
@@ -30,12 +31,12 @@ app = Flask(__name__)
 
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
-TWITTER_FOLLOWERS_ACTOR = "data-slayer/twitter-followers"
-# data-slayer paginates by maxPages (no result count); ~20 followers/page is a
-# defensive estimate used to map the UI's `limit` to maxPages. Tune after a live run.
-# NOTE: capped at ~2k followers/account. To switch to the full-list apidojo actor
-# (needs a paid Apify plan), see docs/twitter-apidojo-switch.md.
-TWITTER_FOLLOWERS_PER_PAGE = 20
+# Twitter/X followers via kaitoeasyapi/premium-x-follower-scraper-following-data
+# (imported as _X_FOLLOWER_ACTOR). One call per handle returns up to `maxFollowers`
+# followers WITH profile data inline (name, bio, website, location) — no login, no
+# ~2k/account cap, no maxPages pagination. The actor floors result count at 200
+# (_X_FOLLOWER_MIN). Cost ≈ $0.15 / 1k users.
+TWITTER_FOLLOWERS_ACTOR = _X_FOLLOWER_ACTOR
 
 # Approximate Apify pricing per result (used for client-side cost preview)
 COST_PER_FOLLOWER = 0.002
@@ -470,7 +471,7 @@ HTML = """
         <span>Estimated cost</span>
         <span class="cost-tag" id="costTag">~$0.40</span>
         <span class="dim">·</span>
-        <span class="dim">≈ $""" + f"{COST_PER_FOLLOWER:.4f}" + """ per result · Apify actor min limit 100</span>
+        <span class="dim" id="costNote">≈ $""" + f"{COST_PER_FOLLOWER:.4f}" + """ per result · Apify actor min limit 100</span>
       </div>
     </section>
 
@@ -640,7 +641,8 @@ HTML = """
   <script>
     const COST_PER_FOLLOWER = """ + f"{COST_PER_FOLLOWER}" + """;
     const COST_PER_PROFILE = """ + f"{COST_PER_PROFILE}" + """;
-    const COST_PER_FOLLOWER_TW = 0.0015;  // data-slayer/twitter-followers, ~$1.50/1k
+    const COST_PER_FOLLOWER_TW = 0.00015;  // kaitoeasyapi/premium-x-follower-scraper, ~$0.15/1k
+    const TWITTER_MIN_LIMIT = """ + f"{_X_FOLLOWER_MIN}" + """;  // actor floors result count at 200
 
     let currentData = [];
     let hasDetails = false;
@@ -689,9 +691,11 @@ HTML = """
 
     // --- Cost preview (live) ---
     function updateCostTag() {
-      const limit = parseInt(document.getElementById('limit').value) || 0;
-      const rate = document.getElementById('platform').value === 'twitter'
-        ? COST_PER_FOLLOWER_TW : COST_PER_FOLLOWER;
+      let limit = parseInt(document.getElementById('limit').value) || 0;
+      const isTw = document.getElementById('platform').value === 'twitter';
+      // Twitter actor floors the result count at 200 — cost reflects what's billed.
+      if (isTw) limit = Math.max(limit, TWITTER_MIN_LIMIT);
+      const rate = isTw ? COST_PER_FOLLOWER_TW : COST_PER_FOLLOWER;
       const cost = limit * rate;
       document.getElementById('costTag').textContent = '~$' + cost.toFixed(2);
     }
@@ -708,11 +712,14 @@ HTML = """
         : 'dynastyrewards  (or paste IG URL)';
       document.getElementById('detailsBtn').style.display = isTw ? 'none' : '';
       document.getElementById('igEnrichBtn').style.display = isTw ? 'none' : '';
-      // data-slayer only scrapes followers, so hide the Direction selector for Twitter.
+      // Twitter path is configured for followers only, so hide the Direction selector.
       document.getElementById('type').closest('.field').style.display = isTw ? 'none' : '';
       document.getElementById('emptySub').innerHTML = isTw
         ? 'Try <span style="color:var(--accent);">elonmusk</span>, <span style="color:var(--accent);">nasa</span>, or any public Twitter / X account.'
         : 'Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.';
+      document.getElementById('costNote').textContent = isTw
+        ? '≈ $' + COST_PER_FOLLOWER_TW.toFixed(5) + ' per result · Apify actor min limit ' + TWITTER_MIN_LIMIT
+        : '≈ $' + COST_PER_FOLLOWER.toFixed(4) + ' per result · Apify actor min limit 100';
       updateCostTag();
     }
 
@@ -1658,7 +1665,7 @@ def api_scrape():
         platform = "instagram"
 
     if platform == "twitter":
-        # data-slayer only scrapes followers (no following mode).
+        # Twitter path is configured for followers only (getFollowing off).
         return _scrape_twitter_followers(token, usernames, limit)
 
     data_type = body.get("type", "Followers")
@@ -1691,18 +1698,18 @@ def api_scrape():
 
 def _scrape_twitter_followers(token, usernames, limit):
     """
-    Twitter/X followers via data-slayer/twitter-followers (no login, Free-Plan-friendly).
+    Twitter/X followers via kaitoeasyapi/premium-x-follower-scraper (no login).
 
-    This actor takes a single `userId` and paginates via `maxPages` (1-100); it
-    has no result-count field and only does followers (no following mode). So we
-    call it once per username, derive maxPages from the requested limit, then
-    aggregate and trim. Output carries bio + location + website per follower, so
-    we enrich here and need no profile-details second pass.
+    The actor takes `user_names` and a result count (`maxFollowers`, floored at
+    200) — no maxPages pagination and no ~2k/account cap. We call it once per
+    handle, aggregate, then trim to `limit`. Each record carries bio + location +
+    website inline, so we enrich here and need no profile-details second pass.
 
-    Capped at ~2k followers/account. For the full-list apidojo actor (needs a paid
-    Apify plan), see docs/twitter-apidojo-switch.md.
+    `maxFollowings` must be >=200 even with getFollowing off (actor validation).
+    The real website is the expanded URL inside `entities` (top-level `url` is a
+    t.co short link), resolved by _x_profile_website.
     """
-    max_pages = max(1, min(-(-limit // TWITTER_FOLLOWERS_PER_PAGE), 100))
+    limit = max(_X_FOLLOWER_MIN, limit)
 
     client = ApifyClient(token)
     start = time.time()
@@ -1710,7 +1717,13 @@ def _scrape_twitter_followers(token, usernames, limit):
     try:
         for handle in usernames:
             run = client.actor(TWITTER_FOLLOWERS_ACTOR).call(
-                run_input={"userId": handle, "maxPages": max_pages}
+                run_input={
+                    "user_names": [handle],
+                    "getFollowers": True,
+                    "getFollowing": False,
+                    "maxFollowers": limit,
+                    "maxFollowings": _X_FOLLOWER_MIN,
+                }
             )
             if run:
                 raw.extend(client.dataset(run["defaultDatasetId"]).iterate_items())
@@ -1726,10 +1739,12 @@ def _scrape_twitter_followers(token, usernames, limit):
             "username": d.get("screen_name") or d.get("username") or "",
             "full_name": d.get("name") or "",
             "biography": d.get("description") or "",
-            "external_url": d.get("website") or "",
+            "external_url": _x_profile_website(d),
             "location": d.get("location") or "",
             "followers_count": d.get("followers_count") or 0,
-            "is_verified": d.get("blue_verified") or d.get("verified") or False,
+            # No verified flag for Twitter: the actor only exposes the legacy
+            # `verified` field, which is false for nearly all accounts. The Status
+            # column still shows Public/Private from is_private below.
             # Twitter's "protected" account == Instagram's is_private.
             "is_private": d.get("protected") or d.get("is_private") or d.get("private") or False,
         }
