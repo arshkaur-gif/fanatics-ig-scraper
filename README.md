@@ -1,7 +1,7 @@
 # Reach — Instagram / Twitter / Leaderboard outreach UI
 
 A Flask web app for poker-player outreach. Everything here is backed by **hosted
-APIs only** (Apify, Airtable, OpenAI) — there is no local browser automation, so
+APIs only** (Apify, Airtable, Anthropic) — there is no local browser automation, so
 this branch is **deployable to Vercel**.
 
 > **Branches.** This is `main`, the deployable UI. The full browser-based Hendon
@@ -27,7 +27,7 @@ The app has two tabs:
   earnings, recent earnings, last-active window, and state, then export to CSV.
 
 Both tabs share a **Contact enrichment** action (email/socials lookup via Apify
-social scraping + DuckDuckGo/OpenAI web-search fallback — no browser).
+social scraping + DuckDuckGo/Anthropic web-search fallback — no browser).
 
 ---
 
@@ -41,7 +41,7 @@ APIFY_API_TOKEN=...        # Instagram + Twitter/X scraping + social enrichment
 AIRTABLE_API_KEY=pat...    # personal access token, scope: data.records:read
 AIRTABLE_BASE_ID=app...    # the base holding the players table
 AIRTABLE_TABLE_NAME=hendonmob   # table name or id (defaults to "Players")
-OPENAI_API_KEY=...         # optional — web-search enrichment fallback
+ANTHROPIC_API_KEY=...      # optional — web-search enrichment fallback (Claude Haiku)
 USE_APIDOJO_FOLLOWERS=     # optional — "true" to use the cheaper apidojo IG
                            # follower actor (~$0.55/1k vs ~$2.00/1k). Same shallow
                            # shape, so the IG profile-details second pass is unchanged.

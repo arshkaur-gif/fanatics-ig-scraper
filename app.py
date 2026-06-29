@@ -9,7 +9,7 @@ Tabs / API routes (all backed by hosted APIs — no local browser, Vercel-safe):
   - Instagram (/api/scrape, /api/profile-details) — Apify-backed follower and
     profile scraping. Needs APIFY_API_TOKEN.
   - Contact enrichment (/api/enrich-contacts) — find emails/socials for players.
-    Needs APIFY_API_TOKEN and/or OPENAI_API_KEY. See enrichment/.
+    Needs APIFY_API_TOKEN and/or ANTHROPIC_API_KEY. See enrichment/.
 
 The live browser-based Hendon Mob scraper (full multi-day harvest, headed-Chrome
 URL scraping) lives on the `hendon-scraper` branch — it can't run on serverless.
@@ -1905,11 +1905,11 @@ def api_hendon_leaderboard():
 
 @app.route("/api/enrich-contacts", methods=["POST"])
 def api_enrich_contacts():
-    openai_key = os.getenv("OPENAI_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     apify_key  = os.getenv("APIFY_API_TOKEN")
 
-    if not openai_key and not apify_key:
-        return jsonify(error="OPENAI_API_KEY (web-search) or APIFY_API_TOKEN (social scrape) is required"), 500
+    if not anthropic_key and not apify_key:
+        return jsonify(error="ANTHROPIC_API_KEY (web-search) or APIFY_API_TOKEN (social scrape) is required"), 500
 
     body    = request.json or {}
     players = body.get("players") or []
@@ -1926,7 +1926,7 @@ def api_enrich_contacts():
         results = enrich_batch(
             players,
             profession_hint=profession_hint,
-            openai_api_key=openai_key,
+            anthropic_api_key=anthropic_key,
             apify_token=apify_key,
         )
     except Exception as e:
@@ -1979,7 +1979,7 @@ def api_crawl_status():
     if not run_id:
         return jsonify(error="No run_id provided"), 400
 
-    return jsonify(fetch_crawl_result(run_id, token, os.getenv("OPENAI_API_KEY")))
+    return jsonify(fetch_crawl_result(run_id, token, os.getenv("ANTHROPIC_API_KEY")))
 
 
 if __name__ == "__main__":

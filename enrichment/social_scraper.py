@@ -66,7 +66,7 @@ def _clean_name(raw: str) -> str:
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None) -> dict | None:
+def scrape_profile(url: str, apify_token: str = None, anthropic_api_key: str = None) -> dict | None:
     """
     Scrape a social profile URL and return contact fragments.
 
@@ -85,10 +85,10 @@ def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None
     elif platform == "reddit":
         raw = _scrape_reddit(identifier)
     elif platform == "substack":
-        raw = _scrape_substack(identifier, openai_api_key, apify_token)
+        raw = _scrape_substack(identifier, anthropic_api_key, apify_token)
     else:
         full_url = url if "://" in url else ("https://" + url)
-        raw = _scrape_generic(full_url, openai_api_key, apify_token)
+        raw = _scrape_generic(full_url, anthropic_api_key, apify_token)
 
     if not raw:
         return None
@@ -97,7 +97,7 @@ def scrape_profile(url: str, apify_token: str = None, openai_api_key: str = None
     if not raw.get("emails"):
         external = raw.get("external_url") or ""
         if external and external.startswith("http"):
-            extra = _extract_from_bio_link(external, openai_api_key, apify_token)
+            extra = _extract_from_bio_link(external, anthropic_api_key, apify_token)
             if extra:
                 raw.setdefault("emails", [])
                 raw.setdefault("phones", [])
@@ -460,11 +460,11 @@ def _scrape_reddit(username: str) -> dict | None:
         return None
 
 
-def _scrape_substack(username: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
+def _scrape_substack(username: str, anthropic_api_key: str = None, apify_token: str = None) -> dict | None:
     if not username:
         return None
     about_url = f"https://{username}.substack.com/about"
-    result = _scrape_generic(about_url, openai_api_key, apify_token)
+    result = _scrape_generic(about_url, anthropic_api_key, apify_token)
     if result:
         result.setdefault("profiles", {})
         result["profiles"]["substack"] = f"https://{username}.substack.com"
@@ -534,12 +534,12 @@ def _safe_urlopen(url: str, timeout: int = 10):
 
 # ── Generic HTTP scrape + extraction ─────────────────────────────────────────
 
-def _scrape_generic(url: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
+def _scrape_generic(url: str, anthropic_api_key: str = None, apify_token: str = None) -> dict | None:
     result = None
     try:
         with _safe_urlopen(url, timeout=10) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        result = _extract_contacts_from_html(html, openai_api_key)
+        result = _extract_contacts_from_html(html, anthropic_api_key)
     except Exception:
         result = None
 
@@ -556,7 +556,7 @@ def _scrape_generic(url: str, openai_api_key: str = None, apify_token: str = Non
         and _url_is_fetchable(url)
         and (not result or not (result.get("emails") or result.get("phones")))
     ):
-        crawled = _scrape_website_crawler(url, apify_token, openai_api_key)
+        crawled = _scrape_website_crawler(url, apify_token, anthropic_api_key)
         if crawled:
             return crawled
     return result
@@ -581,7 +581,7 @@ def _crawler_run_input(url: str) -> dict:
     }
 
 
-def _crawl_items_to_result(items: list, openai_api_key: str = None, fallback_url: str = None) -> dict | None:
+def _crawl_items_to_result(items: list, anthropic_api_key: str = None, fallback_url: str = None) -> dict | None:
     """
     Turn website-content-crawler dataset items into the standard contact dict.
 
@@ -596,7 +596,7 @@ def _crawl_items_to_result(items: list, openai_api_key: str = None, fallback_url
     ).strip()
     if not combined:
         return None
-    result = _extract_contacts_from_text(combined, openai_api_key)
+    result = _extract_contacts_from_text(combined, anthropic_api_key)
     if not result:
         return None
     title = (items[0].get("metadata") or {}).get("title")
@@ -606,7 +606,7 @@ def _crawl_items_to_result(items: list, openai_api_key: str = None, fallback_url
     return result
 
 
-def _scrape_website_crawler(url: str, token: str, openai_api_key: str = None) -> dict | None:
+def _scrape_website_crawler(url: str, token: str, anthropic_api_key: str = None) -> dict | None:
     """
     BLOCKING fallback generic scraper backed by apify/website-content-crawler.
 
@@ -617,7 +617,7 @@ def _scrape_website_crawler(url: str, token: str, openai_api_key: str = None) ->
     start_website_crawl / fetch_crawl_result pair below instead.
     """
     items = _run_apify_actor(_CRAWLER_ACTOR, _crawler_run_input(url), token, timeout=90)
-    return _crawl_items_to_result(items, openai_api_key, fallback_url=url)
+    return _crawl_items_to_result(items, anthropic_api_key, fallback_url=url)
 
 
 # ── Async crawl (start + poll) — serverless-safe alternative to the blocking path ─
@@ -642,7 +642,7 @@ def start_website_crawl(url: str, token: str, client=None) -> str | None:
         return None
 
 
-def fetch_crawl_result(run_id: str, token: str, openai_api_key: str = None, client=None) -> dict:
+def fetch_crawl_result(run_id: str, token: str, anthropic_api_key: str = None, client=None) -> dict:
     """
     Poll a crawl run started by start_website_crawl.
 
@@ -661,27 +661,27 @@ def fetch_crawl_result(run_id: str, token: str, openai_api_key: str = None, clie
         if status != "SUCCEEDED":
             return {"status": status, "result": None}
         items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-        return {"status": status, "result": _crawl_items_to_result(items, openai_api_key)}
+        return {"status": status, "result": _crawl_items_to_result(items, anthropic_api_key)}
     except Exception as e:
         return {"status": "ERROR", "result": None, "error": str(e)}
 
 
-def _extract_from_bio_link(url: str, openai_api_key: str = None, apify_token: str = None) -> dict | None:
+def _extract_from_bio_link(url: str, anthropic_api_key: str = None, apify_token: str = None) -> dict | None:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     if any(d in host for d in _SKIP_BIO_DOMAINS):
         return None
-    return _scrape_generic(url, openai_api_key, apify_token)
+    return _scrape_generic(url, anthropic_api_key, apify_token)
 
 
-def _extract_contacts_from_html(html: str, openai_api_key: str = None) -> dict | None:
+def _extract_contacts_from_html(html: str, anthropic_api_key: str = None) -> dict | None:
     text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return _extract_contacts_from_text(text, openai_api_key)
+    return _extract_contacts_from_text(text, anthropic_api_key)
 
 
-def _extract_contacts_from_text(text: str, openai_api_key: str = None) -> dict | None:
+def _extract_contacts_from_text(text: str, anthropic_api_key: str = None) -> dict | None:
     """Pull emails/phones (then LLM as last resort) out of already-clean text."""
     emails = list(dict.fromkeys(
         re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
@@ -695,17 +695,19 @@ def _extract_contacts_from_text(text: str, openai_api_key: str = None) -> dict |
     if emails or phones:
         return {"name": None, "emails": emails, "phones": phones, "bio": None, "profiles": {}, "external_url": None}
 
-    if openai_api_key:
-        return _llm_extract(text[:3000], openai_api_key)
+    if anthropic_api_key:
+        return _llm_extract(text[:3000], anthropic_api_key)
     return None
 
 
 def _llm_extract(text: str, api_key: str) -> dict | None:
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            temperature=0,
             messages=[{
                 "role": "user",
                 "content": (
@@ -714,9 +716,8 @@ def _llm_extract(text: str, api_key: str) -> dict | None:
                     "Use null / empty arrays if not found.\n\n" + text
                 ),
             }],
-            temperature=0,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw = "".join(b.text for b in resp.content if b.type == "text").strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         data = json.loads(raw)

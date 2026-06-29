@@ -18,7 +18,7 @@ from .web_search import enrich_web
 
 
 def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
-                  openai_api_key=None, apify_token=None):
+                  anthropic_api_key=None, apify_token=None):
     result = {
         "name": name,
         "emails": [],
@@ -32,7 +32,7 @@ def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
     if profile_urls and apify_token:
         from .social_scraper import scrape_profile
         for purl in profile_urls:
-            scraped = scrape_profile(purl, apify_token=apify_token, openai_api_key=openai_api_key)
+            scraped = scrape_profile(purl, apify_token=apify_token, anthropic_api_key=anthropic_api_key)
             if not scraped:
                 continue
             if scraped.get("name") and scraped["name"] != name:
@@ -45,22 +45,24 @@ def enrich_person(name, profession_hint="", location_hint="", profile_urls=None,
                 result["confidence"] = "medium"
 
     # Layer 1 — web search + LLM extraction (slow, ~5s/person). Only when no
-    # email was found above and we have an OpenAI key.
-    if not result["emails"] and openai_api_key:
-        web = enrich_web(name, profession_hint=profession_hint, openai_api_key=openai_api_key)
+    # email was found above and we have an Anthropic key.
+    if not result["emails"] and anthropic_api_key:
+        web = enrich_web(name, profession_hint=profession_hint, anthropic_api_key=anthropic_api_key)
         if web:
             result["emails"] += [e for e in (web.get("emails") or []) if e not in result["emails"]]
             result["phones"] += [p for p in (web.get("phones") or []) if p not in result["phones"]]
             result["profiles"].update(web.get("profiles") or {})
             if web.get("emails"):
-                result["source"].append("web_search")
+                # web_search may report which pass found the email (snippet vs
+                # fetched page) via its own source list; fall back to "web_search".
+                result["source"] += web.get("source") or ["web_search"]
                 if result["confidence"] == "none":
                     result["confidence"] = "low"
 
     return result
 
 
-def enrich_followers(brand_handle, limit=200, openai_api_key=None, apify_token=None,
+def enrich_followers(brand_handle, limit=200, anthropic_api_key=None, apify_token=None,
                      follow_bio_links=True):
     """
     Enrich the followers of a brand/team X account.
@@ -102,7 +104,7 @@ def enrich_followers(brand_handle, limit=200, openai_api_key=None, apify_token=N
 
         if (not result["emails"] and follow_bio_links
                 and external.startswith("http")):
-            extra = _extract_from_bio_link(external, openai_api_key, apify_token)
+            extra = _extract_from_bio_link(external, anthropic_api_key, apify_token)
             if extra:
                 result["emails"] += [e for e in (extra.get("emails") or [])
                                      if e not in result["emails"]]
@@ -117,7 +119,7 @@ def enrich_followers(brand_handle, limit=200, openai_api_key=None, apify_token=N
     return results
 
 
-def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=None):
+def enrich_batch(players, profession_hint="", anthropic_api_key=None, apify_token=None):
     """
     Enrich a list of player dicts.
     Each dict needs at minimum: {name}
@@ -138,7 +140,7 @@ def enrich_batch(players, profession_hint="", openai_api_key=None, apify_token=N
             profession_hint=profession_hint,
             location_hint=location,
             profile_urls=profile_urls,
-            openai_api_key=openai_api_key,
+            anthropic_api_key=anthropic_api_key,
             apify_token=apify_token,
         )
         if i < len(players) - 1:
