@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reach · Social outreach</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236366f1' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='18' height='18' rx='5'/><circle cx='12' cy='12' r='4'/><circle cx='17.5' cy='6.5' r='1.2' fill='%236366f1'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1.2" fill="currentColor"/></svg>
+        </div>
+        <div class="brand-title">Reach <span id="brandSub">· Social outreach</span></div>
+      </div>
+      <div class="topbar-actions" id="topbarActions" style="display:none;">
+        <span class="topbar-user">Signed in as <b id="whoami"></b></span>
+        <button class="btn btn-muted btn-xs" onclick="openSettings()">Settings</button>
+        <button class="btn btn-muted btn-xs" onclick="doLogout()">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Auth gate (register / login) ─────────────────────────────────────── -->
+  <div class="gate" id="authGate" style="display:none;">
+    <div class="gate-card">
+      <h1 id="authTitle">Log in to Reach</h1>
+      <p class="sub" id="authSub">Reach is gated per user. Sign in to run scrapes with your own Apify token.</p>
+      <div class="gate-error" id="authError"></div>
+      <form class="gate-form" id="authForm">
+        <div class="field">
+          <label for="authUser">Username</label>
+          <input id="authUser" autocomplete="username" required autofocus>
+        </div>
+        <div class="field">
+          <label for="authPass">Password</label>
+          <input id="authPass" type="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary" id="authBtn">Log in</button>
+      </form>
+      <div class="gate-switch" id="authSwitch">
+        No account yet? <a onclick="setAuthMode('register')">Create one</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Token setup gate (first login / no token yet) ────────────────────── -->
+  <div class="gate" id="tokenGate" style="display:none;">
+    <div class="gate-card">
+      <h1>Connect your Apify token</h1>
+      <p class="sub">Reach calls the Apify API directly from your browser. Paste a personal API token to start scraping.</p>
+      <div class="gate-error" id="tokenError"></div>
+      <form class="gate-form" id="tokenForm">
+        <div class="field">
+          <label for="tokenInput">Apify API token</label>
+          <input id="tokenInput" placeholder="apify_api_..." autocomplete="off" required>
+        </div>
+        <button type="submit" class="btn btn-primary" id="tokenBtn">Save token</button>
+      </form>
+      <div class="token-hint">
+        No token? <a href="https://console.apify.com/sign-up" target="_blank" rel="noopener">Create a free Apify account</a>
+        (~$5/month free usage), then copy your token from
+        <b>Settings → Integrations → Personal API tokens</b>.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Main app ─────────────────────────────────────────────────────────── -->
+  <main class="container" id="app" style="display:none;">
+    <section class="hero">
+      <h1>Scrape a handle's audience</h1>
+      <p>Pull followers or following from any public Instagram or Twitter/X profile. Export to CSV or JSON.</p>
+      <form id="scrapeForm" class="form-grid">
+        <div class="field">
+          <label for="platform">Platform</label>
+          <select id="platform" name="platform" onchange="onPlatformChange()">
+            <option value="instagram">Instagram</option>
+            <option value="twitter">Twitter / X</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="usernames">Handle or URL</label>
+          <input id="usernames" name="usernames" placeholder="dynastyrewards  (or paste IG URL)" required autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="limit">Limit</label>
+          <input id="limit" name="limit" type="number" min="100" max="90000" value="200" title="Apify actor minimum is 100">
+        </div>
+        <div class="field">
+          <label for="type">Direction</label>
+          <select id="type" name="type">
+            <option value="Followers">Followers</option>
+            <option value="Followings">Following</option>
+          </select>
+        </div>
+        <button type="submit" id="submitBtn" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
+          Scrape
+        </button>
+      </form>
+      <div class="form-meta">
+        <span>Estimated cost</span>
+        <span class="cost-tag" id="costTag">~$0.40</span>
+        <span class="cost-warn" id="costWarn">over ~$5 free tier</span>
+        <span class="dim">·</span>
+        <span class="dim" id="costNote">≈ $0.0020 per result · Apify actor min limit 100</span>
+        <label class="apidojo-toggle" id="apidojoWrap" title="Cheaper apidojo/instagram-user-scraper actor">
+          <input type="checkbox" id="apidojoToggle" onchange="updateCostTag()"> apidojo (cheaper)
+        </label>
+      </div>
+    </section>
+
+    <div class="status" id="status"></div>
+
+    <section class="results-card" id="resultsCard">
+      <div class="results-head">
+        <h2>
+          Results
+          <span class="chip" id="resultChip">0</span>
+          <span class="chip success" id="detailsChip" style="display:none;">profile details</span>
+        </h2>
+        <div class="toolbar">
+          <button class="btn btn-accent-2 btn-sm" onclick="fetchProfileDetails()" id="detailsBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            Get profile details
+          </button>
+          <button class="btn btn-muted btn-sm" onclick="exportCSV()">CSV</button>
+          <button class="btn btn-muted btn-sm" onclick="exportJSON()">JSON</button>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input type="text" class="search-input" id="searchInput" placeholder="Search handle or name..." oninput="renderTable()">
+        <div class="filter-divider"></div>
+        <span class="filter-pill active" data-status="all" onclick="setStatusFilter('all')">All</span>
+        <span class="filter-pill" data-status="public" onclick="setStatusFilter('public')">Public</span>
+        <span class="filter-pill" data-status="verified" onclick="setStatusFilter('verified')">Verified</span>
+        <span class="filter-pill" data-status="private" onclick="setStatusFilter('private')">Private</span>
+        <input type="text" class="search-input bio" id="bioInput" placeholder="Bio keyword..." oninput="renderTable()" style="display:none;">
+        <span class="filter-stat" id="filterStat"></span>
+      </div>
+
+      <div class="select-bar" id="selectBar">
+        <span class="select-count"><span id="selectedCount">0</span> selected</span>
+        <button class="btn btn-muted btn-xs" onclick="selectAll()">All</button>
+        <button class="btn btn-muted btn-xs" onclick="deselectAll()">None</button>
+        <button class="btn btn-muted btn-xs" onclick="openSelectedInIG()">Open profiles</button>
+        <button class="btn btn-muted btn-xs" onclick="bulkDmOpen()" style="background:linear-gradient(135deg,#dc2743,#bc1888); color:white; border:none;">Bulk DM</button>
+        <button class="btn btn-muted btn-xs" onclick="openDmLauncher()">DM Launcher</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr id="tableHeader"></tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Generic confirm modal -->
+    <div class="modal-backdrop" id="modalBackdrop">
+      <div class="modal">
+        <div class="modal-title" id="modalTitle"></div>
+        <div class="modal-body" id="modalBody"></div>
+        <div class="modal-actions">
+          <button class="btn btn-muted btn-sm" id="modalCancel">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="modalOk">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings modal (update Apify token) -->
+    <div class="modal-backdrop" id="settingsBackdrop">
+      <div class="modal">
+        <div class="modal-title">Settings</div>
+        <div class="modal-body">
+          Update the Apify token used for scraping. Stored in Reach's per-user private store.
+          <div class="token-hint" style="margin-top:12px;">
+            Get a free token at <a href="https://console.apify.com/sign-up" target="_blank" rel="noopener">console.apify.com</a> →
+            <b>Settings → Integrations → Personal API tokens</b>.
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:14px;">
+          <label for="settingsToken">Apify API token</label>
+          <input id="settingsToken" placeholder="apify_api_..." autocomplete="off">
+        </div>
+        <div class="gate-error" id="settingsError" style="margin-bottom:12px;"></div>
+        <div class="modal-actions">
+          <button class="btn btn-muted btn-sm" onclick="closeSettings()">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="settingsSave" onclick="saveSettingsToken()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- DM Launcher modal -->
+    <div class="modal-backdrop" id="dmModalBackdrop">
+      <div class="modal large">
+        <div class="modal-head">
+          <div class="modal-title" style="margin-bottom:6px;">DM Launcher</div>
+          <div class="modal-body" style="margin-bottom:12px; font-size:13px;">
+            Type a message, then click <b>Open + Copy</b> on each row. The IG DM tab opens and your personalized message is copied to your clipboard — paste with <span style="font-family:'JetBrains Mono',monospace; background:var(--bg-elev); border:1px solid var(--border); padding:1px 6px; border-radius:5px; font-size:11px;">Cmd+V</span> and hit Enter.
+          </div>
+          <textarea id="dmTemplate" placeholder="Hey {name}! Saw you follow some cool accounts — would love to connect.">Hey {name}! Saw you follow some cool accounts — would love to connect.</textarea>
+          <div class="dim tiny" style="font-size:11px; margin-top:6px;">Variables: <code>{name}</code> first name · <code>{username}</code> handle</div>
+        </div>
+        <div class="modal-content" id="dmQueueList"></div>
+        <div class="modal-foot">
+          <div class="dim" style="font-size:12px;"><span id="dmProgress">0 of 0 sent</span></div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-muted btn-sm" onclick="closeDmLauncher()">Done</button>
+            <button class="btn btn-primary btn-sm" onclick="dmOpenAll()">Open all (sequential)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bulk DM modal (shared message for all selected) -->
+    <div class="modal-backdrop" id="bulkDmBackdrop">
+      <div class="modal large">
+        <div class="modal-head">
+          <div class="modal-title" style="margin-bottom:6px;">Bulk DM <span id="bulkDmCount" style="color:var(--text-muted); font-weight:500;"></span></div>
+          <div class="modal-body" style="font-size:13px; margin-bottom:12px;" id="bulkDmIntro">
+            Type the message. We'll copy it to your clipboard and show one link per profile — click each to open the IG tab, paste with <span style="font-family:'JetBrains Mono',monospace; background:var(--bg-elev); border:1px solid var(--border); padding:1px 6px; border-radius:5px; font-size:11px;">Cmd+V</span>, hit Enter.
+          </div>
+          <textarea id="bulkDmMessage" placeholder="Hey! Saw you and wanted to connect."></textarea>
+          <div class="dim tiny" style="font-size:11px; margin-top:6px;">Same message for all — no personalization. Use <b>DM Launcher</b> for per-recipient {name} substitution. Saved automatically.</div>
+        </div>
+        <div class="modal-content" id="bulkDmList" style="display:none;"></div>
+        <div class="modal-foot">
+          <div class="dim" style="font-size:12px;" id="bulkDmFootNote"></div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-muted btn-sm" id="bulkDmCancel">Close</button>
+            <button class="btn btn-primary btn-sm" id="bulkDmGo">Prepare links</button>
+            <button class="btn btn-muted btn-sm" id="bulkDmTryAll" style="display:none;">Try opening all (popups must be allowed)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dm-toast" id="dmToast"></div>
+
+    <div class="empty" id="emptyState">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <div class="empty-title">Enter a handle to get started</div>
+      <div class="empty-sub" id="emptySub">Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.</div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
