@@ -29,6 +29,18 @@ load_dotenv()
 
 app = Flask(__name__)
 
+
+# CORS: the front-end is hosted separately (alveus static app) and calls these
+# JSON endpoints cross-origin. Reads are open / internal-only, so allow any
+# origin. The Apify token stays server-side (env) and is never exposed here.
+@app.after_request
+def _add_cors_headers(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    return resp
+
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
 PROFILE_ACTOR = "apify/instagram-profile-scraper"
 # Cheaper IG follower-discovery actor, opt-in via USE_APIDOJO_FOLLOWERS. Returns
