@@ -19,60 +19,11 @@
         </div>
         <div class="brand-title">Reach <span id="brandSub">· Social outreach</span></div>
       </div>
-      <div class="topbar-actions" id="topbarActions" style="display:none;">
-        <span class="topbar-user">Signed in as <b id="whoami"></b></span>
-        <button class="btn btn-muted btn-xs" onclick="openSettings()">Settings</button>
-        <button class="btn btn-muted btn-xs" onclick="doLogout()">Log out</button>
-      </div>
     </div>
   </header>
 
-  <!-- ── Auth gate (register / login) ─────────────────────────────────────── -->
-  <div class="gate" id="authGate" style="display:none;">
-    <div class="gate-card">
-      <h1 id="authTitle">Log in to Reach</h1>
-      <p class="sub" id="authSub">Reach is gated per user. Sign in to run scrapes with your own Apify token.</p>
-      <div class="gate-error" id="authError"></div>
-      <form class="gate-form" id="authForm">
-        <div class="field">
-          <label for="authUser">Username</label>
-          <input id="authUser" autocomplete="username" required autofocus>
-        </div>
-        <div class="field">
-          <label for="authPass">Password</label>
-          <input id="authPass" type="password" autocomplete="current-password" required>
-        </div>
-        <button type="submit" class="btn btn-primary" id="authBtn">Log in</button>
-      </form>
-      <div class="gate-switch" id="authSwitch">
-        No account yet? <a onclick="setAuthMode('register')">Create one</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── Token setup gate (first login / no token yet) ────────────────────── -->
-  <div class="gate" id="tokenGate" style="display:none;">
-    <div class="gate-card">
-      <h1>Connect your Apify token</h1>
-      <p class="sub">Reach calls the Apify API directly from your browser. Paste a personal API token to start scraping.</p>
-      <div class="gate-error" id="tokenError"></div>
-      <form class="gate-form" id="tokenForm">
-        <div class="field">
-          <label for="tokenInput">Apify API token</label>
-          <input id="tokenInput" placeholder="apify_api_..." autocomplete="off" required>
-        </div>
-        <button type="submit" class="btn btn-primary" id="tokenBtn">Save token</button>
-      </form>
-      <div class="token-hint">
-        No token? <a href="https://console.apify.com/sign-up" target="_blank" rel="noopener">Create a free Apify account</a>
-        (~$5/month free usage), then copy your token from
-        <b>Settings → Integrations → Personal API tokens</b>.
-      </div>
-    </div>
-  </div>
-
   <!-- ── Main app ─────────────────────────────────────────────────────────── -->
-  <main class="container" id="app" style="display:none;">
+  <main class="container" id="app">
     <section class="hero">
       <h1>Scrape a handle's audience</h1>
       <p>Pull followers or following from any public Instagram or Twitter/X profile. Export to CSV or JSON.</p>
@@ -109,10 +60,7 @@
         <span class="cost-tag" id="costTag">~$0.40</span>
         <span class="cost-warn" id="costWarn">over ~$5 free tier</span>
         <span class="dim">·</span>
-        <span class="dim" id="costNote">≈ $0.0020 per result · Apify actor min limit 100</span>
-        <label class="apidojo-toggle" id="apidojoWrap" title="Cheaper apidojo/instagram-user-scraper actor">
-          <input type="checkbox" id="apidojoToggle" onchange="updateCostTag()"> apidojo (cheaper)
-        </label>
+        <span class="dim" id="costNote">≈ $0.0020 per result · min limit 100 (estimate)</span>
       </div>
     </section>
 
@@ -173,29 +121,6 @@
         <div class="modal-actions">
           <button class="btn btn-muted btn-sm" id="modalCancel">Cancel</button>
           <button class="btn btn-primary btn-sm" id="modalOk">OK</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Settings modal (update Apify token) -->
-    <div class="modal-backdrop" id="settingsBackdrop">
-      <div class="modal">
-        <div class="modal-title">Settings</div>
-        <div class="modal-body">
-          Update the Apify token used for scraping. Stored in Reach's per-user private store.
-          <div class="token-hint" style="margin-top:12px;">
-            Get a free token at <a href="https://console.apify.com/sign-up" target="_blank" rel="noopener">console.apify.com</a> →
-            <b>Settings → Integrations → Personal API tokens</b>.
-          </div>
-        </div>
-        <div class="field" style="margin-bottom:14px;">
-          <label for="settingsToken">Apify API token</label>
-          <input id="settingsToken" placeholder="apify_api_..." autocomplete="off">
-        </div>
-        <div class="gate-error" id="settingsError" style="margin-bottom:12px;"></div>
-        <div class="modal-actions">
-          <button class="btn btn-muted btn-sm" onclick="closeSettings()">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="settingsSave" onclick="saveSettingsToken()">Save</button>
         </div>
       </div>
     </div>

@@ -2,31 +2,19 @@
 
 /* ==========================================================================
  * Reach — static Instagram / Twitter follower scraper.
- * Calls the Apify REST API directly from the browser with the user's own
- * token. No backend: auth + token storage go through the alveus per-user
- * private store; scraping runs against api.apify.com.
+ * Thin front-end client of the hosted backend at fanatics-ig-scraper-ecru:
+ * the backend holds the Apify token server-side, runs the scrape, and returns
+ * already-normalized results. No login, no token, no Apify logic in the browser.
  * ======================================================================== */
 
-// alveus API base: /<space>/<app>/api derived from the current path.
-const API = '/' + location.pathname.split('/').filter(Boolean).slice(0, 2).join('/') + '/api';
-const APIFY = 'https://api.apify.com/v2';
+const API_BASE = 'https://fanatics-ig-scraper-ecru.vercel.app';
 
-// ── Cost rates (per result) ────────────────────────────────────────────────
-const COST_PER_FOLLOWER = 0.002;          // IG standard actor
-const COST_PER_FOLLOWER_APIDOJO = 0.0005; // IG apidojo actor
+// ── Cost rates (per result) — client-side estimate only ─────────────────────
+const COST_PER_FOLLOWER = 0.002;          // IG followers
 const COST_PER_PROFILE = 0.0023;          // IG profile-details second pass
 const COST_PER_FOLLOWER_TW = 0.00015;     // Twitter follower actor (~$0.15/1k)
 const TWITTER_MIN_LIMIT = 200;            // Twitter actor floors result count at 200
 const FREE_TIER_WARN = 5;                 // ~$5/month Apify free tier
-
-// ── Apify actor IDs ─────────────────────────────────────────────────────────
-const FOLLOWERS_ACTOR = 'scraping_solutions/instagram-scraper-followers-following-no-cookies';
-const APIDOJO_FOLLOWERS_ACTOR = 'apidojo/instagram-user-scraper';
-const PROFILE_ACTOR = 'apify/instagram-profile-scraper';
-const TWITTER_FOLLOWERS_ACTOR = 'kaitoeasyapi/premium-x-follower-scraper-following-data';
-
-const RUN_POLL_MS = 3000;
-const RUN_MAX_WAIT_MS = 5 * 60 * 1000;
 
 // ── App state ───────────────────────────────────────────────────────────────
 let currentData = [];
@@ -36,452 +24,27 @@ let statusFilter = 'all';
 let sortCol = null;
 let sortDir = 'asc';
 let lastCheckedIdx = null;
-let configRowId = null;   // id of the private-store config row (null until first save)
-let authMode = 'login';   // 'login' | 'register'
 
 /* ==========================================================================
- * alveus auth + private store
+ * Seed-count helper (cost preview only — the backend parses the real input)
  * ======================================================================== */
 
-async function alveus(path, opts = {}) {
-  const res = await fetch(API + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-  });
-  return res;
-}
-
-// On any mid-session 401 we bounce back to the auth gate.
-function handleUnauthed() {
-  configRowId = null;
-  showGate('auth');
-}
-
-async function loadConfig() {
-  let res;
-  try {
-    res = await alveus('/private?collection=eq.config&order=id.desc');
-  } catch (err) {
-    showGate('auth');
-    return;
-  }
-  if (res.status === 401) { showGate('auth'); return; }
-  if (!res.ok) { showGate('auth'); return; }
-
-  const rows = await res.json();
-  showTopbar();
-  if (!Array.isArray(rows) || rows.length === 0) {
-    // Logged in but no config saved yet.
-    configRowId = null;
-    showGate('token');
-    return;
-  }
-  const row = rows[0];
-  configRowId = row.id;
-  const token = row.data && row.data.apifyToken;
-  if (token) {
-    showApp();
-  } else {
-    showGate('token');
-  }
-}
-
-// Read the freshest token from the private store right before a scrape.
-async function getToken() {
-  const res = await alveus('/private?collection=eq.config&order=id.desc');
-  if (res.status === 401) { handleUnauthed(); throw new Error('Session expired — please log in again.'); }
-  if (!res.ok) throw new Error('Could not read your saved token.');
-  const rows = await res.json();
-  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
-  if (row) configRowId = row.id;
-  const token = row && row.data && row.data.apifyToken;
-  if (!token) { showGate('token'); throw new Error('No Apify token saved. Add one to continue.'); }
-  return token;
-}
-
-async function saveToken(token) {
-  let res;
-  if (configRowId != null) {
-    res = await alveus('/private?id=eq.' + encodeURIComponent(configRowId), {
-      method: 'PATCH',
-      body: JSON.stringify({ data: { apifyToken: token } }),
-    });
-  } else {
-    res = await alveus('/private', {
-      method: 'POST',
-      body: JSON.stringify({ collection: 'config', data: { apifyToken: token } }),
-    });
-  }
-  if (res.status === 401) { handleUnauthed(); throw new Error('Session expired — please log in again.'); }
-  if (!res.ok) throw new Error('Failed to save token (' + res.status + ').');
-  // Re-read to capture the row id (fresh POST) and confirm.
-  await loadConfig();
-}
-
-// ── Gate / screen visibility ────────────────────────────────────────────────
-function hide(id) { document.getElementById(id).style.display = 'none'; }
-function show(id, disp) { document.getElementById(id).style.display = disp || ''; }
-
-function showGate(which) {
-  hide('app'); hide('authGate'); hide('tokenGate');
-  if (which === 'auth') { hide('topbarActions'); show('authGate', 'flex'); }
-  else if (which === 'token') { showTopbar(); show('tokenGate', 'flex'); }
-}
-function showApp() {
-  hide('authGate'); hide('tokenGate');
-  showTopbar();
-  show('app', 'block');
-}
-function showTopbar() { show('topbarActions', 'flex'); }
-
-// ── Auth form handling ────────────────────────────────────────────────────
-function setAuthMode(mode) {
-  authMode = mode;
-  const title = document.getElementById('authTitle');
-  const sub = document.getElementById('authSub');
-  const btn = document.getElementById('authBtn');
-  const sw = document.getElementById('authSwitch');
-  const pass = document.getElementById('authPass');
-  clearErr('authError');
-  if (mode === 'register') {
-    title.textContent = 'Create your Reach account';
-    sub.textContent = 'Pick a username and password. Your Apify token is stored privately under this account.';
-    btn.textContent = 'Create account';
-    pass.setAttribute('autocomplete', 'new-password');
-    sw.innerHTML = 'Already have an account? <a onclick="setAuthMode(\'login\')">Log in</a>';
-  } else {
-    title.textContent = 'Log in to Reach';
-    sub.textContent = 'Reach is gated per user. Sign in to run scrapes with your own Apify token.';
-    btn.textContent = 'Log in';
-    pass.setAttribute('autocomplete', 'current-password');
-    sw.innerHTML = 'No account yet? <a onclick="setAuthMode(\'register\')">Create one</a>';
-  }
-}
-
-function showErr(id, msg) { const el = document.getElementById(id); el.textContent = msg; el.classList.add('visible'); }
-function clearErr(id) { const el = document.getElementById(id); el.textContent = ''; el.classList.remove('visible'); }
-
-document.getElementById('authForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  clearErr('authError');
-  const username = document.getElementById('authUser').value.trim();
-  const password = document.getElementById('authPass').value;
-  const btn = document.getElementById('authBtn');
-  if (!username || !password) return;
-  btn.disabled = true;
-  const label = btn.textContent;
-  btn.innerHTML = '<span class="spinner"></span>';
-  try {
-    const path = authMode === 'register' ? '/auth/register' : '/auth/login';
-    const res = await alveus(path, { method: 'POST', body: JSON.stringify({ username, password, cookie: true }) });
-    if (authMode === 'register') {
-      if (res.status === 409) { showErr('authError', 'That username is taken — try logging in instead.'); return; }
-      if (!res.ok && res.status !== 201) { showErr('authError', 'Registration failed (' + res.status + ').'); return; }
-    } else {
-      if (res.status === 401) { showErr('authError', 'Wrong username or password.'); return; }
-      if (!res.ok) { showErr('authError', 'Login failed (' + res.status + ').'); return; }
-    }
-    document.getElementById('authForm').reset();
-    await loadConfig();
-  } catch (err) {
-    showErr('authError', 'Request failed: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = label;
-  }
-});
-
-async function doLogout() {
-  try { await alveus('/auth/logout', { method: 'POST' }); } catch (_) {}
-  configRowId = null;
-  currentData = [];
-  setAuthMode('login');
-  showGate('auth');
-}
-
-// ── Token setup gate ────────────────────────────────────────────────────────
-document.getElementById('tokenForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  clearErr('tokenError');
-  const token = document.getElementById('tokenInput').value.trim();
-  if (!token) return;
-  const btn = document.getElementById('tokenBtn');
-  btn.disabled = true;
-  const label = btn.textContent;
-  btn.innerHTML = '<span class="spinner"></span>';
-  try {
-    await saveToken(token);
-    document.getElementById('tokenInput').value = '';
-  } catch (err) {
-    showErr('tokenError', err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = label;
-  }
-});
-
-// ── Settings modal ────────────────────────────────────────────────────────
-function openSettings() {
-  clearErr('settingsError');
-  document.getElementById('settingsToken').value = '';
-  document.getElementById('settingsToken').placeholder = configRowId != null ? 'Enter a new token to replace the saved one' : 'apify_api_...';
-  document.getElementById('settingsBackdrop').classList.add('visible');
-}
-function closeSettings() { document.getElementById('settingsBackdrop').classList.remove('visible'); }
-
-async function saveSettingsToken() {
-  clearErr('settingsError');
-  const token = document.getElementById('settingsToken').value.trim();
-  if (!token) { showErr('settingsError', 'Paste a token first.'); return; }
-  const btn = document.getElementById('settingsSave');
-  btn.disabled = true;
-  try {
-    await saveToken(token);
-    closeSettings();
-    showToast('Apify token updated', true);
-  } catch (err) {
-    showErr('settingsError', err.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-/* ==========================================================================
- * Apify REST client (async run → poll → items)
- * ======================================================================== */
-
-// Actor IDs in the URL path use `~` instead of `/`.
-function actorPath(id) { return id.replace('/', '~'); }
-
-function apifyErrorMessage(status, body) {
-  if (status === 401) return 'Apify rejected the token. Check it in Settings.';
-  if (status === 402) return 'Apify: out of credit. Your free tier may be exhausted.';
-  if (status === 429) return 'Apify rate limited (429). Wait a bit and retry.';
-  const msg = body && body.error && body.error.message;
-  return 'Apify error (' + status + ')' + (msg ? ': ' + msg : '');
-}
-
-async function apifyFetch(token, path, opts = {}) {
-  const res = await fetch(APIFY + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, ...(opts.headers || {}) },
-  });
-  if (!res.ok) {
-    let body = null;
-    try { body = await res.json(); } catch (_) {}
-    throw new Error(apifyErrorMessage(res.status, body));
-  }
-  return res.json();
-}
-
-// Start an actor run, poll to completion, return dataset items.
-// `onStatus(status, elapsedSec)` is called as the run progresses.
-async function runActor(token, actorId, input, onStatus) {
-  const started = Date.now();
-  const startRes = await apifyFetch(token, '/acts/' + actorPath(actorId) + '/runs', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
-  const runId = startRes.data.id;
-  let datasetId = startRes.data.defaultDatasetId;
-  let status = startRes.data.status;
-
-  while (!['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT', 'TIMED_OUT'].includes(status)) {
-    if (Date.now() - started > RUN_MAX_WAIT_MS) {
-      throw new Error('Timed out after ' + Math.round(RUN_MAX_WAIT_MS / 60000) + ' min waiting for Apify. The run may still finish in your Apify console.');
-    }
-    if (onStatus) onStatus(status, Math.round((Date.now() - started) / 1000));
-    await new Promise(r => setTimeout(r, RUN_POLL_MS));
-    const poll = await apifyFetch(token, '/actor-runs/' + runId);
-    status = poll.data.status;
-    datasetId = poll.data.defaultDatasetId || datasetId;
-  }
-
-  if (status !== 'SUCCEEDED') {
-    throw new Error('Apify run ended with status ' + status + '.');
-  }
-  const items = await apifyFetch(token, '/datasets/' + datasetId + '/items?clean=true');
-  return { items: Array.isArray(items) ? items : [], elapsed: ((Date.now() - started) / 1000).toFixed(1) };
-}
-
-/* ==========================================================================
- * Field extraction — JS port of enrichment/follower_fields.py
- * ======================================================================== */
-
-// Emoji / pictographic ranges to strip from names (matches _EMOJI_RE).
-const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️]/gu;
-
-function splitName(fullName, username) {
-  let cleaned = (fullName || '').replace(EMOJI_RE, '');
-  cleaned = cleaned.replace(/\s+/g, ' ').replace(/^[\s.\-_|·•]+|[\s.\-_|·•]+$/g, '');
-  const parts = cleaned.split(' ').filter(Boolean);
-  if (parts.length === 0) return [(username || '').trim().replace(/^@/, ''), ''];
-  if (parts.length === 1) return [parts[0], ''];
-  return [parts[0], parts.slice(1).join(' ')];
-}
-
-const URL_RE = /(?:https?:\/\/|www\.)[^\s,)>'"<\]]+/gi;
-const BARE_DOMAIN_RE = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?:\/[^\s,)>'"<\]]*)?/gi;
-const EMAIL_RE = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
-const URL_TRIM = /[.,;)>\]"']+$/;
-const LINK_TLDS = new Set([
-  'com', 'net', 'org', 'io', 'co', 'me', 'tv', 'gg', 'xyz', 'app', 'dev',
-  'design', 'link', 'bio', 'site', 'shop', 'store', 'blog', 'info', 'page',
-  'online', 'live', 'studio', 'art', 'photo', 'media', 'news', 'club', 'fm',
-  'fan', 'ai', 'gl', 'gd', 'ly', 'to', 'sh', 'st', 'ee', 'am', 'us', 'uk',
-  'ca', 'au', 'de', 'fr', 'es', 'it', 'nl', 'eu', 'in', 'tech',
-]);
-
-function extractLinks(bio, externalUrl) {
-  const links = [];
-  const seen = new Set();
-  const add = (url) => {
-    url = (url || '').trim().replace(URL_TRIM, '');
-    if (!url) return;
-    if (!url.startsWith('http')) url = 'https://' + url;
-    const key = url.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
-    if (!seen.has(key)) { seen.add(key); links.push(url); }
-  };
-  const externals = Array.isArray(externalUrl) ? externalUrl : [externalUrl];
-  externals.forEach((ext) => {
-    if (ext && typeof ext === 'object') ext = ext.url || ext.link || '';
-    add(ext);
-  });
-  const text = (bio || '').replace(EMAIL_RE, ' ');
-  (text.match(URL_RE) || []).forEach(add);
-  (text.match(BARE_DOMAIN_RE) || []).forEach((m) => {
-    const tld = m.split('/')[0].split('.').pop().toLowerCase();
-    if (LINK_TLDS.has(tld)) add(m);
-  });
-  return links;
-}
-
-// Twitter website resolver — JS port of _x_profile_website.
-function xProfileWebsite(d) {
-  const ent = d.entities || {};
-  for (const key of ['url', 'description']) {
-    const urls = (ent[key] || {}).urls || [];
-    for (const u of urls) { if (u.expanded_url) return u.expanded_url; }
-  }
-  let raw = d.url || '';
-  if (raw && !raw.startsWith('http')) raw = 'https://' + raw;
-  return raw;
-}
-
-// Parse the seed handle input (comma / URL forms) — JS port of _parse_usernames.
-function parseUsernames(raw) {
-  const out = [];
+// Count the seed handles in the raw input, purely for the per-seed Twitter
+// cost estimate. The backend does the authoritative parsing on scrape.
+function countSeeds(raw) {
+  let n = 0;
   for (let u of (raw || '').split(',')) {
     u = u.trim().replace(/^@+|@+$/g, '');
     const parts = u.split('/').filter(Boolean);
     const username = parts.length ? parts[parts.length - 1] : '';
-    if (username && username !== 'www.instagram.com' && username !== 'instagram.com') out.push(username);
+    if (username && username !== 'www.instagram.com' && username !== 'instagram.com') n++;
   }
-  return out;
+  return n;
 }
 
 /* ==========================================================================
- * Scrape orchestration
+ * Scrape — POST to backend /api/scrape (results already normalized)
  * ======================================================================== */
-
-function useApidojo() { return document.getElementById('apidojoToggle').checked; }
-
-async function scrapeInstagram(token, handles, limit, type, onStatus) {
-  if (useApidojo()) {
-    const { items, elapsed } = await runActor(token, APIDOJO_FOLLOWERS_ACTOR, {
-      handles,
-      getFollowers: type === 'Followers',
-      getFollowings: type === 'Followings',
-      maxItems: limit + handles.length,
-    }, onStatus);
-    const results = [];
-    for (const d of items) {
-      // apidojo mixes seed profiles (no `related`) with follower rows — keep only rows.
-      if (!d.related) continue;
-      const username = d.username || '';
-      const fullName = d.fullName || d.full_name || '';
-      const [first, last] = splitName(fullName, username);
-      results.push({
-        username,
-        full_name: fullName,
-        first_name: first,
-        last_name: last,
-        is_private: d.isPrivate || false,
-        is_verified: d.isVerified || false,
-        id: d.id || d.userId || '',
-        profile_pic_url: d.profilePicUrl || d.profilePicUrlHD || '',
-        username_scrape: (d.related && (d.related.username || d.related)) || '',
-      });
-      if (results.length >= limit) break;
-    }
-    return { results, elapsed };
-  }
-
-  const { items, elapsed } = await runActor(token, FOLLOWERS_ACTOR, {
-    Account: handles,
-    resultsLimit: limit,
-    dataToScrape: type,
-  }, onStatus);
-  const results = items.map((item) => {
-    const [first, last] = splitName(item.full_name || '', item.username || '');
-    return {
-      username: item.username || '',
-      full_name: item.full_name || '',
-      first_name: first,
-      last_name: last,
-      is_private: item.is_private || false,
-      is_verified: item.is_verified || false,
-      id: item.id || '',
-      profile_pic_url: item.profile_pic_url || '',
-      username_scrape: item.username_scrape || '',
-    };
-  });
-  return { results, elapsed };
-}
-
-async function scrapeTwitter(token, handles, limit, onStatus) {
-  const capped = Math.max(TWITTER_MIN_LIMIT, limit);
-  let raw = [];
-  let elapsedTotal = 0;
-  // The actor is per-seed: call once per handle and aggregate.
-  for (const handle of handles) {
-    const { items, elapsed } = await runActor(token, TWITTER_FOLLOWERS_ACTOR, {
-      user_names: [handle],
-      getFollowers: true,
-      getFollowing: false,
-      maxFollowers: capped,
-      maxFollowings: TWITTER_MIN_LIMIT, // actor validates >=200 even when off
-    }, onStatus);
-    elapsedTotal += parseFloat(elapsed);
-    raw = raw.concat(items.map((it) => ({ __seed: handle, ...it })));
-  }
-  raw = raw.slice(0, capped);
-  const results = raw.map((d) => {
-    const username = d.screen_name || d.username || '';
-    const fullName = d.name || '';
-    const [first, last] = splitName(fullName, username);
-    const bio = d.description || '';
-    const externalUrl = xProfileWebsite(d);
-    return {
-      username,
-      full_name: fullName,
-      first_name: first,
-      last_name: last,
-      is_private: d.protected || d.is_private || d.private || false,
-      is_verified: d.verified || false,
-      id: d.id_str || d.id || '',
-      profile_pic_url: d.profile_image_url_https || d.profile_image_url || '',
-      username_scrape: d.__seed || '',
-      biography: bio,
-      bio,
-      followers_count: d.followers_count || 0,
-      location: d.location || '',
-      external_url: externalUrl,
-      links: extractLinks(bio, externalUrl),
-    };
-  });
-  return { results, elapsed: elapsedTotal.toFixed(1) };
-}
 
 document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -489,8 +52,7 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
   const limit = Math.max(100, Math.min(parseInt(document.getElementById('limit').value) || 200, 90000));
   const type = document.getElementById('type').value;
   const platform = document.getElementById('platform').value;
-  const handles = parseUsernames(rawInput);
-  if (!handles.length) return;
+  if (!rawInput) return;
   curPlatform = platform;
 
   const btn = document.getElementById('submitBtn');
@@ -498,22 +60,27 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Scraping';
   status.className = 'status visible';
-  status.innerHTML = '<span class="spinner"></span><span>Starting Apify run — this can take a few minutes...</span>';
+  status.innerHTML = '<span class="spinner"></span><span>Scraping — this can take a few minutes...</span>';
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('resultsCard').classList.remove('visible');
   document.getElementById('detailsChip').style.display = 'none';
   document.getElementById('bioInput').style.display = 'none';
   hasDetails = false;
 
-  const onStatus = (st, secs) => {
-    status.innerHTML = '<span class="spinner"></span><span>Apify run ' + escapeHtml(st) + ' — ' + secs + 's elapsed...</span>';
-  };
-
   try {
-    const token = await getToken();
-    const { results, elapsed } = platform === 'twitter'
-      ? await scrapeTwitter(token, handles, limit, onStatus)
-      : await scrapeInstagram(token, handles, limit, type, onStatus);
+    const res = await fetch(API_BASE + '/api/scrape', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: rawInput, limit, type, platform }),
+    });
+    if (!res.ok) {
+      let msg = '';
+      try { const b = await res.json(); msg = b && b.error; } catch (_) {}
+      throw new Error(msg || 'Scrape failed — the backend may be busy or the handle is private.');
+    }
+    const data = await res.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    const elapsed = data.elapsed != null ? data.elapsed : '?';
     currentData = results;
     document.getElementById('resultChip').textContent = results.length;
     status.className = 'status visible success';
@@ -523,7 +90,7 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
     document.getElementById('resultsCard').classList.add('visible');
   } catch (err) {
     status.className = 'status visible error';
-    status.textContent = err.message;
+    status.textContent = err.message || 'Scrape failed — the backend may be busy or the handle is private.';
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg> Scrape';
@@ -531,7 +98,7 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
 });
 
 /* ==========================================================================
- * Profile details (IG second pass) — apify/instagram-profile-scraper
+ * Profile details (IG second pass) — POST to backend /api/profile-details
  * ======================================================================== */
 
 async function fetchProfileDetails() {
@@ -555,49 +122,47 @@ async function fetchProfileDetails() {
   status.className = 'status visible';
   status.innerHTML = '<span class="spinner"></span><span>Fetching profile details for ' + targets.length + ' handles...</span>';
 
-  const onStatus = (st, secs) => {
-    status.innerHTML = '<span class="spinner"></span><span>Apify run ' + escapeHtml(st) + ' — ' + secs + 's elapsed...</span>';
-  };
-
   try {
-    const token = await getToken();
     const cleaned = targets.map(u => u.trim().replace(/^@/, '')).filter(Boolean);
-    const { items, elapsed } = await runActor(token, PROFILE_ACTOR, { usernames: cleaned }, onStatus);
-    // Normalize each item the way /api/profile-details did (bio, links, location).
+    const res = await fetch(API_BASE + '/api/profile-details', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: cleaned }),
+    });
+    if (!res.ok) {
+      let msg = '';
+      try { const b = await res.json(); msg = b && b.error; } catch (_) {}
+      throw new Error(msg || 'Profile details failed — the backend may be busy or a handle is private.');
+    }
+    const data = await res.json();
+    const items = Array.isArray(data.results) ? data.results : [];
+    const elapsed = data.elapsed != null ? data.elapsed : '?';
+    // The backend returns already-normalized profile records; merge by username.
     const map = {};
     items.forEach((item) => {
       const uname = (item.username || '').toLowerCase();
       if (!uname) return;
-      const bio = item.biography || '';
-      const externals = [];
-      const single = item.externalUrl || item.external_url;
-      if (single) externals.push(single);
-      (item.externalUrls || []).forEach(e => externals.push(e));
-      map[uname] = {
-        biography: bio,
-        bio,
-        followersCount: item.followersCount,
-        followsCount: item.followsCount,
-        postsCount: item.postsCount,
-        externalUrl: single || '',
-        location: item.location || '',
-        links: extractLinks(bio, externals),
-      };
+      map[uname] = item;
     });
     let matched = 0;
     currentData.forEach((row) => {
       const d = map[(row.username || '').toLowerCase()];
-      if (d) {
-        row.biography = d.biography || row.biography || '';
-        row.followers_count = d.followersCount != null ? d.followersCount : row.followers_count;
-        row.follows_count = d.followsCount != null ? d.followsCount : row.follows_count;
-        row.posts_count = d.postsCount != null ? d.postsCount : row.posts_count;
-        row.external_url = d.externalUrl || row.external_url || '';
-        row.bio = d.bio || row.bio || '';
-        row.location = d.location || row.location || '';
-        row.links = (d.links && d.links.length) ? d.links : (row.links || []);
-        matched++;
-      }
+      if (!d) return;
+      const bio = d.biography != null ? d.biography : (d.bio != null ? d.bio : '');
+      const followers = d.followers_count != null ? d.followers_count : d.followersCount;
+      const follows = d.follows_count != null ? d.follows_count : d.followsCount;
+      const posts = d.posts_count != null ? d.posts_count : d.postsCount;
+      const external = d.external_url || d.externalUrl || '';
+      const links = Array.isArray(d.links) ? d.links : (Array.isArray(d.externalUrls) ? d.externalUrls : null);
+      row.biography = bio || row.biography || '';
+      row.bio = bio || row.bio || '';
+      row.followers_count = followers != null ? followers : row.followers_count;
+      row.follows_count = follows != null ? follows : row.follows_count;
+      row.posts_count = posts != null ? posts : row.posts_count;
+      row.external_url = external || row.external_url || '';
+      row.location = d.location || row.location || '';
+      row.links = (links && links.length) ? links : (row.links || []);
+      matched++;
     });
     hasDetails = true;
     document.getElementById('detailsChip').style.display = 'inline-flex';
@@ -607,7 +172,7 @@ async function fetchProfileDetails() {
     renderTable();
   } catch (err) {
     status.className = 'status visible error';
-    status.textContent = err.message;
+    status.textContent = err.message || 'Profile details failed — the backend may be busy or a handle is private.';
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> Get profile details';
@@ -615,18 +180,15 @@ async function fetchProfileDetails() {
 }
 
 /* ==========================================================================
- * Cost preview
+ * Cost preview — client-side estimate only
  * ======================================================================== */
 
 function updateCostTag() {
   let limit = parseInt(document.getElementById('limit').value) || 0;
   const isTw = document.getElementById('platform').value === 'twitter';
-  const handles = parseUsernames(document.getElementById('usernames').value) || [];
-  const seedCount = Math.max(1, handles.length);
+  const seedCount = Math.max(1, countSeeds(document.getElementById('usernames').value));
   if (isTw) limit = Math.max(limit, TWITTER_MIN_LIMIT);
-  let rate;
-  if (isTw) rate = COST_PER_FOLLOWER_TW;
-  else rate = useApidojo() ? COST_PER_FOLLOWER_APIDOJO : COST_PER_FOLLOWER;
+  const rate = isTw ? COST_PER_FOLLOWER_TW : COST_PER_FOLLOWER;
   // Twitter actor is per-seed; IG actors take all seeds in one run.
   const cost = isTw ? (limit * rate * seedCount) : (limit * rate);
   document.getElementById('costTag').textContent = '~$' + cost.toFixed(2);
@@ -640,14 +202,13 @@ function onPlatformChange() {
     ? 'elonmusk  (or paste X/Twitter URL)'
     : 'dynastyrewards  (or paste IG URL)';
   document.getElementById('detailsBtn').style.display = isTw ? 'none' : '';
-  document.getElementById('apidojoWrap').style.display = isTw ? 'none' : '';
   document.getElementById('type').closest('.field').style.display = isTw ? 'none' : '';
   document.getElementById('emptySub').innerHTML = isTw
     ? 'Try <span style="color:var(--accent);">elonmusk</span>, <span style="color:var(--accent);">nasa</span>, or any public Twitter / X account.'
     : 'Try <span style="color:var(--accent);">dynastyrewards</span>, <span style="color:var(--accent);">humansofny</span>, or any public IG account.';
   document.getElementById('costNote').textContent = isTw
-    ? '≈ $' + COST_PER_FOLLOWER_TW.toFixed(5) + ' per result · Apify actor min limit ' + TWITTER_MIN_LIMIT
-    : '≈ $' + (useApidojo() ? COST_PER_FOLLOWER_APIDOJO : COST_PER_FOLLOWER).toFixed(4) + ' per result · Apify actor min limit 100';
+    ? '≈ $' + COST_PER_FOLLOWER_TW.toFixed(5) + ' per result · min limit ' + TWITTER_MIN_LIMIT + ' (estimate)'
+    : '≈ $' + COST_PER_FOLLOWER.toFixed(4) + ' per result · min limit 100 (estimate)';
   updateCostTag();
 }
 document.getElementById('limit').addEventListener('input', updateCostTag);
@@ -1154,8 +715,7 @@ function download(content, filename, mime) {
 }
 
 /* ==========================================================================
- * Boot
+ * Boot — no auth/config load; just initialize the UI.
  * ======================================================================== */
-setAuthMode('login');
+onPlatformChange();
 updateCostTag();
-loadConfig();

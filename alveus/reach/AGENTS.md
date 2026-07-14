@@ -3,47 +3,56 @@
 ## What this app is
 
 Reach is a static front-end app (no server, no build step, no Node/Python
-runtime) for scraping Instagram/Twitter follower & following lists via the
-**Apify REST API, called directly from the browser**. It is a port of the
-IG/Twitter scraping tab of an internal Flask tool; the backend-dependent
-Leaderboards (Hendon Mob) and contact-enrichment features were intentionally
-dropped.
+runtime) for scraping Instagram/Twitter follower & following lists. It is a
+**thin client** of a hosted backend that does the actual scraping; the Apify
+token stays server-side on that backend. It is a port of the IG/Twitter scraping
+tab of an internal Flask tool; the backend-dependent Leaderboards (Hendon Mob)
+and contact-enrichment features were intentionally dropped.
 
 Files:
-- `index.html` — markup (auth gate, token gate, main app, modals). Links
-  `styles.css` and `app.js`. Inline SVG favicon.
-- `styles.css` — extracted styles + auth/settings/token additions.
-- `app.js` — all logic: alveus auth + private store, Apify REST client,
-  actor payloads, normalization, table/filter/sort/export, DM helpers.
+- `index.html` — markup (main app + modals). Links `styles.css` and `app.js`.
+  Inline SVG favicon. No auth/token/settings markup.
+- `styles.css` — extracted styles.
+- `app.js` — all logic: two backend calls, table/filter/sort/export, cost
+  estimate, DM helpers.
 - `app.yaml` — alveus manifest (`description`, `tags`).
 
-## alveus constraints followed
+## Architecture
 
-- **Front-end only.** No backend of its own; everything is vanilla JS + fetch,
-  dependency-free (only the Google Fonts CDN link, which degrades gracefully).
-- **Per-user auth + private store.** API base is derived at runtime:
-  `'/' + location.pathname.split('/').filter(Boolean).slice(0,2).join('/') + '/api'`.
-  Auth via `POST /auth/{register,login,logout}` with `cookie:true`. Config
-  (the Apify token) lives in `GET/POST/PATCH /private` under
-  `collection: 'config'`, `data.apifyToken`. Any 401 returns the user to the
-  auth screen.
-- **Token handling.** The Apify token is read fresh from `/private` right before
-  each scrape and **never** written to `localStorage` or the URL/query string.
-  Apify is authenticated with the `Authorization: Bearer` header (not a query
-  param), which Apify permits over CORS.
+- **Front-end only.** Everything is vanilla JS + fetch, dependency-free (only the
+  Google Fonts CDN link, which degrades gracefully).
+- **No login, no token in the browser.** There is no alveus auth and no per-user
+  private store. This is an internal-only tool with no access gate.
+- **Backend client.** All scraping is delegated to a hosted Flask backend:
+  ```
+  const API_BASE = 'https://fanatics-ig-scraper-ecru.vercel.app';
+  ```
+  The backend holds the Apify token server-side, runs the actors, and returns
+  already-normalized records. CORS is open (any origin).
 
-## Apify integration notes
+## Backend endpoints
 
-- Async pattern: `POST /acts/{actorId}/runs` → poll `GET /actor-runs/{runId}`
-  every ~3s until terminal (5-min max wait) → `GET /datasets/{id}/items?clean=true`.
-- Actor IDs put `~` where the id has `/`.
-- Actors + payloads live in `app.js` (`scrapeInstagram`, `scrapeTwitter`,
-  `fetchProfileDetails`). apidojo IG results are filtered to rows with a
-  `related` back-ref (seed profiles dropped). Twitter is called once per seed
-  and aggregated; its limit floors at 200.
-- `splitName` and `extractLinks` are JS ports of `enrichment/follower_fields.py`;
-  `xProfileWebsite` ports `_x_profile_website` from `enrichment/social_scraper.py`.
-- Result shape matches the original Flask output so the table renders unchanged.
+- `POST ${API_BASE}/api/scrape`
+  - request: `{ usernames: "<raw input string>", limit, type: "Followers"|"Followings", platform: "instagram"|"twitter" }`.
+    Send the raw input string as-typed — the **backend** parses handles/URLs.
+  - response: `{ results: [...normalized records...], elapsed, count }`.
+- `POST ${API_BASE}/api/profile-details`
+  - request: `{ usernames: ["handle1", ...] }`.
+  - response: `{ results: [...profile records...], elapsed, count }`.
+    Merged into `currentData` by username; reads bio/biography, followers_count,
+    follows_count, posts_count, external_url/externalUrl, links/externalUrls,
+    location.
+
+The result shape matches what the table renders (username, full_name,
+first_name, last_name, is_private, is_verified, id, profile_pic_url,
+username_scrape; Twitter adds biography/followers_count/location/external_url).
+
+## Cost preview
+
+Client-side estimate only (`updateCostTag`). Rates: IG followers `0.002`, IG
+profile-details `0.0023`, Twitter `0.00015` (Twitter limit floored at 200,
+billed per seed). The backend picks the actor and bears the real cost, so there
+is no client actor toggle.
 
 ## Editing scope
 

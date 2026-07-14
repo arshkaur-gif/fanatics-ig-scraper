@@ -57,9 +57,6 @@ body {
 .brand-mark svg { width: 16px; height: 16px; color: white; }
 .brand-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
 .brand-title span { color: var(--text-muted); font-weight: 500; }
-.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-.topbar-user { font-size: 12px; color: var(--text-dim); }
-.topbar-user b { color: var(--text-muted); font-weight: 600; }
 
 .container { max-width: 1320px; margin: 0 auto; padding: 32px 28px 80px; }
 
@@ -111,8 +108,6 @@ body {
 .cost-tag { font-family: 'JetBrains Mono', monospace; color: #a7f3d0; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); padding: 3px 9px; border-radius: 999px; font-size: 11.5px; }
 .cost-warn { font-family: 'JetBrains Mono', monospace; color: #fcd34d; background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); padding: 3px 9px; border-radius: 999px; font-size: 11.5px; display: none; }
 .cost-warn.visible { display: inline-flex; }
-.apidojo-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-muted); }
-.apidojo-toggle input { accent-color: var(--accent); width: 13px; height: 13px; }
 
 button { font-family: inherit; cursor: pointer; border: none; }
 
@@ -304,38 +299,3 @@ input[type="checkbox"].row-check { width: 15px; height: 15px; accent-color: var(
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes scaleIn { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
-
-/* ── Auth / token screens ───────────────────────────────────────────────── */
-.gate { min-height: 70vh; display: flex; align-items: center; justify-content: center; padding: 40px 20px; }
-.gate-card {
-  background: linear-gradient(180deg, var(--panel) 0%, var(--bg-elev) 100%);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 32px;
-  width: 100%; max-width: 420px;
-  position: relative; overflow: hidden;
-}
-.gate-card::before {
-  content: ""; position: absolute; inset: 0;
-  background: radial-gradient(500px 180px at 90% -40%, rgba(99,102,241,0.16), transparent 60%);
-  pointer-events: none;
-}
-.gate-card h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 6px; position: relative; z-index: 1; }
-.gate-card p.sub { color: var(--text-muted); font-size: 13.5px; margin-bottom: 22px; position: relative; z-index: 1; }
-.gate-form { display: flex; flex-direction: column; gap: 12px; position: relative; z-index: 1; }
-.gate-form .field { padding: 8px 14px; }
-.gate-form .btn { width: 100%; margin-top: 4px; }
-.gate-switch { margin-top: 16px; font-size: 13px; color: var(--text-muted); text-align: center; position: relative; z-index: 1; }
-.gate-switch a { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 500; }
-.gate-switch a:hover { text-decoration: underline; }
-.gate-error { color: #fecaca; font-size: 13px; background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.4); padding: 9px 12px; border-radius: var(--radius); display: none; position: relative; z-index: 1; }
-.gate-error.visible { display: block; }
-.token-hint {
-  margin-top: 18px; font-size: 12.5px; color: var(--text-muted);
-  background: var(--bg-elev); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 12px 14px; line-height: 1.55;
-  position: relative; z-index: 1;
-}
-.token-hint a { color: var(--accent); text-decoration: none; }
-.token-hint a:hover { text-decoration: underline; }
-.token-hint code { font-family: 'JetBrains Mono', monospace; background: var(--panel-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 5px; font-size: 11px; color: var(--text); }

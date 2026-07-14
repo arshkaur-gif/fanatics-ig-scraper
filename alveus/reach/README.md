@@ -6,33 +6,25 @@ CSV or JSON for outreach. It also includes client-side DM helpers (per-recipient
 DM Launcher and shared-message Bulk DM) that open profile tabs and copy your
 message to the clipboard.
 
-It is a **pure static front-end app** (HTML + CSS + vanilla JS). There is no
-backend of its own: it talks directly to the [Apify](https://apify.com) REST API
-from your browser, and stores your credentials in alveus's per-user private store.
+It is a **static front-end app** (HTML + CSS + vanilla JS) hosted on alveus. It
+has no scraping logic of its own: it is a thin client that calls a hosted backend
+which does the actual Apify scraping and returns already-normalized results.
 
-## Bring your own Apify token
+## Architecture
 
-Each user needs their own free Apify token.
+- **Front-end (this app):** static HTML/CSS/JS on alveus. Renders the form,
+  results table, filters, exports, and DM helpers. It makes exactly two network
+  calls, both to the backend:
+  - `POST https://fanatics-ig-scraper-ecru.vercel.app/api/scrape`
+  - `POST https://fanatics-ig-scraper-ecru.vercel.app/api/profile-details`
+- **Backend:** a hosted Flask service at
+  `https://fanatics-ig-scraper-ecru.vercel.app`. It holds the **Apify token
+  server-side**, orchestrates the Apify actors, and returns normalized records.
+  CORS is enabled (any origin), so the browser can call it directly.
 
-1. Create a free account at <https://console.apify.com/sign-up> (~$5/month of free
-   platform usage).
-2. Copy your token from **Settings → Integrations → Personal API tokens**.
-3. Paste it into Reach the first time you log in (or later via **Settings**).
-
-The scrapers run as Apify "actors" (paid per result). Reach shows a live cost
-estimate before you run, and warns when an estimate exceeds the ~$5 free tier.
-
-## Login
-
-Reach is gated per user via alveus auth:
-
-- **Register** a username + password the first time, then **log in**.
-- Your session lasts ~24 hours; after it expires you'll be sent back to the login
-  screen.
-- **Log out** from the top bar.
-
-Your Apify token is saved under your account in the alveus private store and read
-back fresh before each scrape.
+There is **no login and no token in the browser.** The old "bring your own Apify
+token" flow and the alveus per-user auth/private-store are gone — the token lives
+only on the backend. This is an internal-only tool with no access gate.
 
 ## Scope
 
@@ -42,29 +34,17 @@ results table (avatars, sorting, filtering, selection), CSV/JSON export, and the
 client-side DM/bulk-open helpers.
 
 **Not included:** the Hendon Mob / Leaderboards tab and the contact-enrichment
-("Enrich Contacts") features from the original internal tool — those depended on
-a server and are out of scope here.
+("Enrich Contacts") features from the original internal tool.
 
-## Cost reference (per result)
+## Cost reference (per result — client-side estimate only)
 
 | Actor                              | Rate       |
 |------------------------------------|------------|
-| Instagram followers (standard)     | $0.0020    |
-| Instagram followers (apidojo, opt) | $0.0005    |
+| Instagram followers                | $0.0020    |
 | Instagram profile details          | $0.0023    |
 | Twitter followers (per seed)       | $0.00015   |
 
-The Twitter actor floors its result count at 200 and is billed per seed handle.
-The apidojo Instagram actor is cheaper and available via a toggle (off by
-default).
-
-## Security note
-
-Your Apify token is stored in Reach's **per-user private store** — scoped to your
-alveus account. Because Reach calls Apify from the browser, the token is present
-in your browser at runtime and **visible to anyone with access to your browser
-devtools/network tab**. Treat it accordingly:
-
-- Don't reuse a high-value or organization-wide token here.
-- Prefer a dedicated, low-scope Apify token you can rotate or revoke.
-- The token is never written to `localStorage` or the URL.
+Reach shows a live cost estimate before you run and warns when an estimate
+exceeds the ~$5 free tier. The Twitter actor floors its result count at 200 and
+is billed per seed handle. The estimate is informational only — the backend
+chooses the actual actor and bears the Apify cost.

@@ -30,15 +30,43 @@ load_dotenv()
 app = Flask(__name__)
 
 
-# CORS: the front-end is hosted separately (alveus static app) and calls these
-# JSON endpoints cross-origin. Reads are open / internal-only, so allow any
-# origin. The Apify token stays server-side (env) and is never exposed here.
+# CORS + origin gate. The front-end is hosted separately (alveus static app)
+# and calls these JSON endpoints cross-origin; the Apify token stays server-side
+# and is never exposed. We lock access to an allowlist of origins (like the osb
+# app does), reflecting only an allowed Origin in the CORS header AND rejecting
+# non-allowed origins server-side with 403. Note: this blocks cross-site browser
+# abuse but is not auth — a direct client can still spoof the Origin header.
+ALLOWED_ORIGINS = {
+    "https://alveus.ai.dsea.cafe",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8080",
+}
+
+
+def _request_origin_allowed():
+    return request.headers.get("Origin") in ALLOWED_ORIGINS
+
+
+@app.before_request
+def _gate_api_by_origin():
+    # Let CORS preflight through so the browser can complete the check itself.
+    if request.method == "OPTIONS":
+        return None
+    if request.path.startswith("/api/") and not _request_origin_allowed():
+        return jsonify({"error": "forbidden origin"}), 403
+    return None
+
+
 @app.after_request
 def _add_cors_headers(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Max-Age"] = "86400"
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
 FOLLOWERS_ACTOR = "scraping_solutions/instagram-scraper-followers-following-no-cookies"
@@ -1671,7 +1699,10 @@ def _parse_usernames(raw: str) -> list[str]:
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    # UI intentionally disabled: this deployment is an API backend for the
+    # alveus-hosted front-end. The old browser UI (HTML string) is no longer
+    # served here. The /api/* endpoints remain (origin-gated above).
+    return jsonify({"service": "reach-api", "ui": "moved to the alveus app"}), 404
 
 
 @app.route("/api/scrape", methods=["POST"])
