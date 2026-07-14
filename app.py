@@ -15,8 +15,10 @@ The live browser-based Hendon Mob scraper (full multi-day harvest, headed-Chrome
 URL scraping) lives on the `hendon-scraper` branch — it can't run on serverless.
 """
 
+import hmac
 import os
 import time
+from collections import defaultdict, deque
 
 from apify_client import ApifyClient
 from dotenv import load_dotenv
@@ -34,8 +36,17 @@ app = Flask(__name__)
 # and calls these JSON endpoints cross-origin; the Apify token stays server-side
 # and is never exposed. We lock access to an allowlist of origins (like the osb
 # app does), reflecting only an allowed Origin in the CORS header AND rejecting
-# non-allowed origins server-side with 403. Note: this blocks cross-site browser
-# abuse but is not auth — a direct client can still spoof the Origin header.
+# non-allowed origins server-side with 403.
+#
+# The origin check alone is NOT auth — a direct client (curl) can spoof the
+# Origin header. So /api/* ALSO requires a shared client tag in the X-Reach-Client
+# header, compared against REACH_CLIENT_TAG. The alveus front-end sends it; the
+# public internet doesn't have it, so bare curl against the deploy gets 401. The
+# tag isn't truly secret (it ships in the front-end JS) but that JS is only
+# reachable to FBG staff behind Twingate, so only they can read it. This keeps
+# the public internet out; it does not stop an authorized insider (the per-IP
+# rate limit below, spend caps in the Apify/OpenAI dashboards, and the capped
+# `limit` bound that blast radius).
 ALLOWED_ORIGINS = {
     "https://alveus.ai.dsea.cafe",
     "http://localhost:8000",
@@ -43,18 +54,62 @@ ALLOWED_ORIGINS = {
     "http://localhost:8080",
 }
 
+# Set in the Vercel project env (next to APIFY_API_TOKEN). If unset, /api/* fails
+# closed (401) — deploy the backend and set this before the front-end goes live.
+CLIENT_TAG = os.environ.get("REACH_CLIENT_TAG", "").strip()
+
+# Light per-IP rate limit on /api/*: a sliding window kept in instance memory.
+# On Vercel each warm instance has its own counters, so this is best-effort, not
+# exact — good enough to bound runaway spend (every /api/* call costs Apify
+# money), not a hard security boundary. 20 calls / 10 min is far above legit use:
+# a single scrape takes minutes, so a real user makes a handful of calls an hour.
+RATE_LIMIT_MAX = int(os.environ.get("REACH_RATE_LIMIT_MAX", "20"))
+RATE_LIMIT_WINDOW_S = int(os.environ.get("REACH_RATE_LIMIT_WINDOW_S", "600"))
+_rate_buckets: dict[str, deque] = defaultdict(deque)
+
+
+def _client_ip():
+    # Vercel puts the real client IP first in X-Forwarded-For.
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return fwd.split(",")[0].strip() or request.remote_addr or "unknown"
+
+
+def _rate_limited(ip: str) -> bool:
+    now = time.time()
+    q = _rate_buckets[ip]
+    while q and now - q[0] > RATE_LIMIT_WINDOW_S:
+        q.popleft()
+    if len(q) >= RATE_LIMIT_MAX:
+        return True
+    q.append(now)
+    return False
+
 
 def _request_origin_allowed():
     return request.headers.get("Origin") in ALLOWED_ORIGINS
 
 
+def _request_client_allowed():
+    if not CLIENT_TAG:
+        return False
+    # Constant-time compare so the check doesn't leak the tag byte-by-byte.
+    return hmac.compare_digest(request.headers.get("X-Reach-Client", ""), CLIENT_TAG)
+
+
 @app.before_request
-def _gate_api_by_origin():
+def _gate_api():
     # Let CORS preflight through so the browser can complete the check itself.
     if request.method == "OPTIONS":
         return None
-    if request.path.startswith("/api/") and not _request_origin_allowed():
+    if not request.path.startswith("/api/"):
+        return None
+    if not _request_origin_allowed():
         return jsonify({"error": "forbidden origin"}), 403
+    if not _request_client_allowed():
+        return jsonify({"error": "unauthorized"}), 401
+    if _rate_limited(_client_ip()):
+        resp = jsonify({"error": "rate limited — try again in a few minutes"})
+        return resp, 429, {"Retry-After": str(RATE_LIMIT_WINDOW_S)}
     return None
 
 
@@ -65,7 +120,7 @@ def _add_cors_headers(resp):
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Reach-Client"
         resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
@@ -1716,7 +1771,9 @@ def api_scrape():
     if not usernames:
         return jsonify(error="No usernames provided"), 400
 
-    limit = max(100, min(body.get("limit", 200), 90000))
+    # Cap the ceiling low enough that a single request can't rack up a huge Apify
+    # bill (5000 * ~$0.002 ≈ $10 worst case). Raise deliberately if a real job needs more.
+    limit = max(100, min(body.get("limit", 200), 5000))
     platform = body.get("platform", "instagram")
     if platform not in ("instagram", "twitter"):
         platform = "instagram"

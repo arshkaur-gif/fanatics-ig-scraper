@@ -9,6 +9,15 @@
 
 const API_BASE = 'https://fanatics-ig-scraper-ecru.vercel.app';
 
+// Shared client tag sent on every backend call as the X-Reach-Client header. The
+// backend rejects requests without it (it compares against the REACH_CLIENT_TAG
+// Vercel env var), which keeps the public internet from hitting the API by curl.
+// This is NOT a true secret — it ships in this file — but the app is only
+// reachable to FBG people behind Twingate, so only they can read it. The value
+// here MUST match the Vercel env var exactly. To rotate: change both and redeploy.
+const CLIENT_TAG = 'reach-alveus-prod-56ecfed0';
+const apiHeaders = () => ({ 'Content-Type': 'application/json', 'X-Reach-Client': CLIENT_TAG });
+
 // ── Cost rates (per result) — client-side estimate only ─────────────────────
 const COST_PER_FOLLOWER = 0.002;          // IG followers
 const COST_PER_PROFILE = 0.0023;          // IG profile-details second pass
@@ -49,7 +58,7 @@ function countSeeds(raw) {
 document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const rawInput = document.getElementById('usernames').value.trim();
-  const limit = Math.max(100, Math.min(parseInt(document.getElementById('limit').value) || 200, 90000));
+  const limit = Math.max(100, Math.min(parseInt(document.getElementById('limit').value) || 200, 5000));
   const type = document.getElementById('type').value;
   const platform = document.getElementById('platform').value;
   if (!rawInput) return;
@@ -70,7 +79,7 @@ document.getElementById('scrapeForm').addEventListener('submit', async (e) => {
   try {
     const res = await fetch(API_BASE + '/api/scrape', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ usernames: rawInput, limit, type, platform }),
     });
     if (!res.ok) {
@@ -126,7 +135,7 @@ async function fetchProfileDetails() {
     const cleaned = targets.map(u => u.trim().replace(/^@/, '')).filter(Boolean);
     const res = await fetch(API_BASE + '/api/profile-details', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ usernames: cleaned }),
     });
     if (!res.ok) {

@@ -21,14 +21,22 @@ Files:
 
 - **Front-end only.** Everything is vanilla JS + fetch, dependency-free (only the
   Google Fonts CDN link, which degrades gracefully).
-- **No login, no token in the browser.** There is no alveus auth and no per-user
-  private store. This is an internal-only tool with no access gate.
+- **No login, no real secret in the browser.** There is no alveus auth and no
+  per-user private store.
 - **Backend client.** All scraping is delegated to a hosted Flask backend:
   ```
   const API_BASE = 'https://fanatics-ig-scraper-ecru.vercel.app';
   ```
   The backend holds the Apify token server-side, runs the actors, and returns
-  already-normalized records. CORS is open (any origin).
+  already-normalized records.
+- **Access gate.** The backend only accepts `/api/*` calls that (1) come from an
+  allowlisted Origin (alveus host + localhost dev — others get 403), (2) carry an
+  `X-Reach-Client` header matching its `REACH_CLIENT_TAG` env var (else 401), and
+  (3) stay under a light per-IP rate limit (~20 calls/10 min, else 429). The tag
+  is defined as `CLIENT_TAG` in `app.js` and sent by `apiHeaders()` — every new
+  backend call MUST use `apiHeaders()`. The tag is not a true secret (Twingate is
+  the real boundary); to rotate it, change the Vercel env var and `app.js`
+  together.
 
 ## Backend endpoints
 

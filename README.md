@@ -38,6 +38,11 @@ Set these in a local `.env` (see `.env.example`) for local runs, or in the
 
 ```
 APIFY_API_TOKEN=...        # Instagram + Twitter/X scraping + social enrichment
+REACH_CLIENT_TAG=...       # REQUIRED for /api/* — shared tag the Reach front-end
+                           # sends as X-Reach-Client; must match CLIENT_TAG in
+                           # alveus/reach/app.js. Unset ⇒ all /api/* return 401.
+REACH_RATE_LIMIT_MAX=      # optional — per-IP calls allowed per window (default 20)
+REACH_RATE_LIMIT_WINDOW_S= # optional — rate-limit window in seconds (default 600)
 AIRTABLE_API_KEY=pat...    # personal access token, scope: data.records:read
 AIRTABLE_BASE_ID=app...    # the base holding the players table
 AIRTABLE_TABLE_NAME=hendonmob   # table name or id (defaults to "Players")

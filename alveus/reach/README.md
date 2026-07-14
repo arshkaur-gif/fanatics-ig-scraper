@@ -20,11 +20,28 @@ which does the actual Apify scraping and returns already-normalized results.
 - **Backend:** a hosted Flask service at
   `https://fanatics-ig-scraper-ecru.vercel.app`. It holds the **Apify token
   server-side**, orchestrates the Apify actors, and returns normalized records.
-  CORS is enabled (any origin), so the browser can call it directly.
 
-There is **no login and no token in the browser.** The old "bring your own Apify
-token" flow and the alveus per-user auth/private-store are gone — the token lives
-only on the backend. This is an internal-only tool with no access gate.
+There is **no login and no real secret in the browser.** The old "bring your own
+Apify token" flow and the alveus per-user auth/private-store are gone — the token
+lives only on the backend.
+
+## Security
+
+The backend gates every `/api/*` call with three layers:
+
+1. **Origin allowlist (403).** CORS reflects only allowed origins (the alveus
+   host + localhost dev ports), and non-allowed origins are rejected server-side,
+   blocking cross-site browser abuse.
+2. **Shared client tag (401).** Every request must carry an `X-Reach-Client`
+   header matching the backend's `REACH_CLIENT_TAG` env var. The front-end ships
+   the tag in `app.js` — it is *not* a true secret, but the app is only reachable
+   to FBG staff behind Twingate, so it keeps the public internet (bare curl) out.
+   To rotate: change the Vercel env var and `CLIENT_TAG` in `app.js` together.
+3. **Per-IP rate limit (429).** A light sliding window (default 20 calls per
+   10 min, best-effort per serverless instance) bounds runaway Apify spend.
+
+None of this stops a determined insider — Apify dashboard spend caps and the
+capped scrape `limit` bound that blast radius.
 
 ## Scope
 
